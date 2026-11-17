@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Boxloft Amazon Sync",
+  "version": "2.3.0",
+  "description": "Reads the Amazon and Walmart order pages Boxloft asks for, at most every 2 hours and never 10 PM to 6 AM ET (only those sites, at a fixed pace) and sends them to the Boxloft warehouse app.",
+  "permissions": [
+    "alarms",
+    "storage",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "https://www.amazon.com/*",
+    "https://www.walmart.com/*",
+    "http://localhost:5101/*",
+    "https://boxloft.example/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Boxloft Amazon Sync"
+  },
+  "icons": {
+    "128": "icon128.png"
+  }
+}

@@ -1,0 +1,29 @@
+# cp .env.example .env   (fill it in)
+# docker compose up -d --build
+# docker compose exec app python3 scripts/setup.py admin "Your Name"    -> prints the admin's setup link
+services:
+  app:
+    build: .
+    env_file: .env
+    environment:
+      BOXLOFT_DATA: /data
+    volumes:
+      - data:/data
+    ports:
+      - "80:80"
+      - "443:443"
+    restart: unless-stopped
+  caddy:
+    image: caddy:2
+    network_mode: service:app
+    environment:
+      DOMAIN: ${DOMAIN:-http://localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+volumes:
+  data:
+  caddy_data:
+  caddy_config:

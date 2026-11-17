@@ -1,0 +1,2 @@
+# Only if you pick Anthropic as the AI provider (BOXLOFT_AI_PROVIDER=anthropic, or ANTHROPIC_API_KEY set).
+anthropic

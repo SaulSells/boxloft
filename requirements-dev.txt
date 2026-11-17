@@ -1,0 +1,2 @@
+# The server uses only the Python standard library. Tests need pytest.
+pytest>=8

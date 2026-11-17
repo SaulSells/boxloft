@@ -1,0 +1,19 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body { font: 13px -apple-system, system-ui, sans-serif; width: 300px; margin: 0; padding: 14px; color: #2b1f29; }
+  h1 { font-size: 15px; margin: 0 0 10px; } label { display: block; margin: 8px 0 3px; font-weight: 600; }
+  input { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #ccc; border-radius: 6px; }
+  button { margin-top: 10px; width: 100%; padding: 8px; border: 0; border-radius: 6px; background: #6b8e68; color: #fff; font-weight: 600; cursor: pointer; }
+  button.secondary { background: #eee; color: #2b1f29; } #status { margin-top: 10px; white-space: pre-wrap; font-size: 12px; }
+</style></head>
+<body>
+  <h1>Boxloft Amazon Sync</h1>
+  <label for="server">Boxloft address</label><input id="server" placeholder="http://localhost:5101">
+  <label for="token">Sync token (Boxloft → Settings → Amazon sync)</label><input id="token" type="password" placeholder="bl_...">
+  <label for="device">This computer's name</label><input id="device" placeholder="House computer">
+  <button id="save" class="secondary">Save</button>
+  <button id="sync">Sync now</button>
+  <div id="status"></div>
+  <script src="popup.js"></script>
+</body></html>

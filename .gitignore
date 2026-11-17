@@ -1,0 +1,13 @@
+data/
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+web/node_modules/
+web/dist/
+*.db
+*.db-wal
+*.db-shm
+*.tsbuildinfo
+.DS_Store
+extension/local-config.json

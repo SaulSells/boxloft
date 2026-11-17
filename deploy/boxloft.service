@@ -1,0 +1,20 @@
+# Without Docker: /etc/systemd/system/boxloft.service. Code in /opt/boxloft, data in /var/lib/boxloft.
+#   useradd --system boxloft && mkdir -p /var/lib/boxloft && chown boxloft /var/lib/boxloft
+#   cd /opt/boxloft/web && npm ci && npm run build
+#   Put the .env values in /etc/boxloft/env (root:boxloft, mode 640). Caddy on the same machine: deploy/Caddyfile.
+[Unit]
+Description=Boxloft warehouse app (Python on 127.0.0.1:5101 behind Caddy)
+After=network-online.target
+
+[Service]
+User=boxloft
+WorkingDirectory=/opt/boxloft
+EnvironmentFile=/etc/boxloft/env
+Environment=BOXLOFT_DATA=/var/lib/boxloft
+ExecStart=/usr/bin/python3 /opt/boxloft/backend/server.py
+Restart=always
+RestartSec=3
+MemoryMax=600M
+
+[Install]
+WantedBy=multi-user.target
