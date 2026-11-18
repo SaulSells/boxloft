@@ -9,7 +9,7 @@ import { PackageCard, isLabel, type LabelAnswer } from '@/components/app/Package
 import { navigate, useQueryParam } from '@/lib/router';
 import { useScan, useScanBus } from '@/lib/scan';
 import { parseCode } from '@/lib/codes';
-import { useCurrentBox } from '@/lib/currentBox';
+import { curPath, useCurrentBox } from '@/lib/currentBox';
 
 /* A carrier label scanned with no box open (Alex 11-16): what the box holds. The scan is logged as "in hand".
  * A box label scanned here opens that box with this card, ready for "Put 2 in A31". Item scans go on to the shell. */
@@ -29,10 +29,10 @@ export function LabelPage() {
       .catch((e) => toast(e instanceof Error ? e.message : 'Could not read the label', { tone: 'error' }));
   }, [code]); // eslint-disable-line react-hooks/exhaustive-deps
   const tracking = r?.kind === 'label' || r?.kind === 'label_return' ? r.tracking_id : code;
-  const toBox = (id: number) => navigate(`/boxes/${id}?label=${encodeURIComponent(tracking)}`);
+  const toPage = (path: string) => navigate(`${path}?label=${encodeURIComponent(tracking)}`);
   useScan((c) => {
     const p = parseCode(c);
-    if (p.kind === 'box') { feedback(true); toBox(p.id); return; }
+    if (p.kind === 'box' || p.kind === 'location') { feedback(true); toPage(`/${p.kind === 'box' ? 'boxes' : 'locations'}/${p.id}`); return; }
     navigate(`/label?code=${encodeURIComponent(c)}`, true);   // another label (or an item: the server sends it on)
   });
   const damaged = async (returnId: number, left: number) => {   // a buyer return that can't be sold again
@@ -51,14 +51,14 @@ export function LabelPage() {
             <div className="space-y-2">
               <div className="text-sm">Can it be sold again? Scan the box label it goes in.</div>
               {r.items.filter((i) => i.left > 0 && i.shipped_from?.box_id).slice(0, 1).map((i) => (
-                <Button key={i.return_id} className="h-12 w-full text-base" onClick={() => toBox(i.shipped_from!.box_id!)}><BoxIcon className="mr-1.5 h-4 w-4" />Back in {i.shipped_from!.name}, where it shipped from</Button>
+                <Button key={i.return_id} className="h-12 w-full text-base" onClick={() => toPage(`/boxes/${i.shipped_from!.box_id!}`)}><BoxIcon className="mr-1.5 h-4 w-4" />Back in {i.shipped_from!.name}, where it shipped from</Button>
               ))}
             </div>
           )}
           {r?.kind === 'label' && r.left > 0 && (
             <div className="space-y-2">
               <div className="text-sm">Scan the box label you are putting these in.</div>
-              {cur && <Button className="h-12 w-full text-base" onClick={() => toBox(cur.box_id)}><BoxIcon className="mr-1.5 h-4 w-4" />Put them in {cur.name}</Button>}
+              {cur && <Button className="h-12 w-full text-base" onClick={() => toPage(curPath(cur))}><BoxIcon className="mr-1.5 h-4 w-4" />Put them in {cur.name}</Button>}
             </div>
           )}
         </CardContent>

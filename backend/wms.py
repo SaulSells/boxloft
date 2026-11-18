@@ -305,11 +305,20 @@ class Wms:
         return _one(self._conn().execute(sql, params))
 
     def _tx(self):
-        """Context manager: one write transaction under the process write lock."""
+        """Context manager: one write transaction under the process write lock. Nested in a _tx of the same thread it
+        is a SAVEPOINT: an error inside rolls back only its own writes, as before, and the outer _tx decides for all.
+        So a save made of several saves (Not this? Change, a count change: undo the old line, then save the new one)
+        wraps them in one _tx and is all or nothing (review 11-17: a refused new save left the old line undone)."""
         wms = self
 
         class _Tx:
             def __enter__(self):
+                self.depth = getattr(wms._local, 'tx_depth', 0)
+                if self.depth:   # this thread holds the write lock and an open transaction already
+                    self.conn = wms._conn()
+                    self.conn.execute(f'SAVEPOINT tx{self.depth}')
+                    wms._local.tx_depth = self.depth + 1
+                    return self.conn
                 wms._write_lock.acquire()
                 try:
                     self.conn = wms._conn()
@@ -317,16 +326,25 @@ class Wms:
                 except BaseException:   # a failed BEGIN (database busy) must not keep the lock: every save would hang
                     wms._write_lock.release()
                     raise
+                wms._local.tx_depth = 1
                 return self.conn
 
             def __exit__(self, exc_type, exc, tb):
+                if self.depth:
+                    wms._local.tx_depth = self.depth
+                    if exc_type is not None:
+                        self.conn.execute(f'ROLLBACK TO tx{self.depth}')
+                    self.conn.execute(f'RELEASE tx{self.depth}')
+                    wms.write_seq += 1   # read caches built inside see the writes so far; a rollback drops them too
+                    return False
                 try:
                     if exc_type is None:
                         self.conn.execute('COMMIT')
-                        wms.write_seq += 1
                     else:
                         self.conn.execute('ROLLBACK')
+                    wms.write_seq += 1   # a cache filled inside the transaction must not outlive its rollback
                 finally:
+                    wms._local.tx_depth = 0
                     wms._write_lock.release()
                 return False
 
@@ -524,7 +542,7 @@ class Wms:
                 c.execute('UPDATE location SET archived = ? WHERE id = ?', (1 if archived else 0, location_id))
 
     def get_location(self, location_id: int) -> dict:
-        loc = self._q1('SELECT id, code, name, kind, archived FROM location WHERE id = ?', (location_id,))
+        loc = self._q1('SELECT id, code, name, site, kind, archived FROM location WHERE id = ?', (location_id,))
         if not loc:
             raise WmsError('Location not found')
         loc['scan_code'] = make_code('location', loc['id'])
@@ -975,6 +993,9 @@ class Wms:
             for t in ('purchase_line', 'listing', 'sales_line', 'photo_read'):
                 if t in tables:
                     c.execute(f'UPDATE {t} SET product_id = NULL WHERE product_id = ?', (product_id,))
+            if 'photo_freed' in tables:   # an erased item's photo-id photo may go on the right item (census 11-17)
+                c.execute("""INSERT OR IGNORE INTO photo_freed (photo_id) SELECT id FROM photo
+                              WHERE product_id = ? AND removed = 0 AND source = 'photo-id'""", (product_id,))
             c.execute('UPDATE photo SET product_id = NULL, removed = 1 WHERE product_id = ?', (product_id,))
             if 'scan_code' in tables:
                 c.execute('DELETE FROM scan_code WHERE product_id = ?', (product_id,))
@@ -1018,6 +1039,7 @@ class Wms:
     # ------------------------------------------------------------------ photos
 
     def add_photo(self, path: str, user_id: int, product_id: int = None, unit_id: int = None, source: str = 'upload') -> dict:
+        """An uploaded or catalog photo. A photo-id photo goes on through PhotoId.claim (one check-and-write)."""
         if not product_id and not unit_id:
             raise WmsError('A photo needs a product or a unit')
         with self._tx() as c:
@@ -1519,6 +1541,28 @@ class Wms:
                 raise WmsError(f'Box {bm[0]} has moved again since. Move it by hand.')
             self._move_box(c, new_id, bm[0], bm[1])
         c.execute('UPDATE action SET reversed_by = ? WHERE id = ?', (new_id, action_id))
+        # The Add card's photo (Alex 11-17): a photo a box page save put on its item comes off with that save, in this
+        # same transaction, whichever Undo runs (the line's or History's). Review 11-17: it was a separate write.
+        if c.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'box_add_photo'").fetchone():
+            # A line on a Stock audit row keeps its save as count_id (the batch's newest audit_count row), not the
+            # action: one of the batch's actions undone takes the photo off too (review round 5, 11-17).
+            audit = c.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_count'").fetchone()
+            for add_id, photo_id in c.execute("""SELECT bp.add_id, bp.photo_id FROM box_add_photo bp JOIN box_add b ON b.id = bp.add_id
+                                                 WHERE b.action_id = ? OR ',' || COALESCE(b.action_ids, '') || ',' LIKE ?"""
+                                              + (""" OR (b.kind = 'audit' AND b.count_id IN (
+                                                     SELECT c2.id FROM audit_count c1 JOIN audit_count c2
+                                                         ON c2.item_id = c1.item_id AND (c2.batch = c1.batch OR c2.id = c1.id)
+                                                      WHERE c1.action_id = ?))""" if audit else ''),
+                                              (action_id, f'%,{action_id},%') + ((action_id,) if audit else ())).fetchall():
+                c.execute('DELETE FROM box_add_photo WHERE add_id = ?', (add_id,))
+                if c.execute('SELECT 1 FROM box_add_photo WHERE photo_id = ?', (photo_id,)).fetchone():
+                    continue   # another standing line saved from this photo still holds it (review round 6)
+                ph = c.execute('SELECT path, product_id FROM photo WHERE id = ? AND removed = 0', (photo_id,)).fetchone()
+                if ph:
+                    c.execute('UPDATE photo SET removed = 1 WHERE id = ?', (photo_id,))
+                    c.execute('INSERT OR IGNORE INTO photo_freed (photo_id) VALUES (?)', (photo_id,))   # may go on the right item
+                    if c.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'photo_read'").fetchone():
+                        c.execute('UPDATE photo_read SET product_id = NULL, saved_title = NULL WHERE photo = ? AND product_id = ?', ph)
         return new_id
 
     # ------------------------------------------------------------------ reading the ledger

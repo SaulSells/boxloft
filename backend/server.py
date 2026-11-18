@@ -77,6 +77,7 @@ sales = Sales(wms, commerce, connections)
 listings = Listings(wms, commerce, connections)
 listings.catalog = catalog   # Amazon listing photos from Keepa (Alex 11-13)
 sorting = Sorting(wms, commerce, audit, catalog, listings)
+sorting.photos = photo_reader   # Add card photo (Alex 11-17): the photo goes on the item a save made
 labels = Labels(wms)
 sorting.labels = labels   # a carrier label scanned on a box page shows what is inside (Alex 11-16)
 buyer_returns = BuyerReturns(wms, connections)
@@ -1646,6 +1647,7 @@ def put_away(h):
                     _int(d.get('replaces')))
     if str(r.get('kind', '')).startswith('label'):   # a carrier label (Alex 11-16): what is inside
         return _label_names(r)
+    r = sorting.attach_photo(r, str(d.get('photo_token') or ''), h.user['id'])   # a pick from the Add card's photo
     return _with_amazon(r, d, _to(d))
 
 
@@ -1653,7 +1655,7 @@ def put_away(h):
 
 @route('GET', '/api/put/new-card')
 def put_new_card(h):
-    r = sorting.new_card(h.query.get('code', '')[:120])
+    r = sorting.new_card(h.query.get('code', '')[:120], h.query.get('title', '')[:200])
     asins = [r['asin']] if r.get('asin') else []
     asins += [li.get('asin') for li in r.get('listings') or [] if li.get('asin')]
     approval.ensure(asins)   # a GET: never under the lock
@@ -1665,9 +1667,11 @@ def put_new_card(h):
 @route('POST', '/api/put/new')
 def put_new(h):
     d = h.json_body()
-    return _with_amazon(sorting.put_new(_to(d), h.user['id'], h.device, str(d.get('scan_id') or ''), str(d.get('code') or '')[:120],
-                                        str(d.get('title') or '')[:200], _int(d.get('line_id')), _int(d.get('listing_id')),
-                                        _int(d.get('product_id'))), d, _to(d))
+    r = sorting.put_new(_to(d), h.user['id'], h.device, str(d.get('scan_id') or ''), str(d.get('code') or '')[:120],
+                        str(d.get('title') or '')[:200], _int(d.get('line_id')), _int(d.get('listing_id')),
+                        _int(d.get('product_id')))
+    # Alex 11-17, an item with no barcode: the Add card's photo becomes the new item's photo.
+    return _with_amazon(sorting.attach_photo(r, str(d.get('photo_token') or ''), h.user['id']), d, _to(d))
 
 
 @route('POST', '/api/put/<aid>/qty')

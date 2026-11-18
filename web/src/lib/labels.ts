@@ -2,7 +2,7 @@ import JsBarcode from 'jsbarcode';
 import QRCode from 'qrcode';
 import { prettyCode } from '@/lib/format';
 import { post } from '@/api/client';
-import { buildingOf, placeText } from '@/lib/places';
+import { buildingOf, isShelf, placeText } from '@/lib/places';
 
 /*
  * Labels print from the browser at the exact label size (@page), one label per page.
@@ -173,13 +173,12 @@ export const boxLabel = (b: { scan_code: string; id: number; name?: string; loca
   };
 };
 
-// A shelf label: its name big (S2), the building under it.
-export const locationLabel = (l: { scan_code: string; code: string; name?: string; site?: string }): Label => ({
-  kind: 'location',
-  code: l.scan_code,
-  big: l.code,
-  lines: [buildingOf(l)].filter(Boolean),
-});
+// A shelf label: its name big (S2), the building under it. A place that is not a named shelf prints its name
+// ("Alex's basement"), never its made-up code (ALEXSBASEM, Fable review 11-17).
+export const locationLabel = (l: { scan_code: string; code: string; name?: string; site?: string; kind?: string }): Label => {
+  const shelf = isShelf(l);
+  return { kind: 'location', code: l.scan_code, big: shelf ? l.code : placeText(l), lines: shelf ? [buildingOf(l)].filter(Boolean) : [] };
+};
 
 /** The label of a box or shelf the server just made or found (sorting.target): name big, building under it. */
 export const targetLabel = (t: { type: 'box' | 'shelf'; code: string; scan_code: string; where: string }): Label => ({

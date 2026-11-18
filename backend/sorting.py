@@ -17,6 +17,7 @@ per receipt) so they can be listed. Undo reverses the receipt; the row then stop
 
 Every write carries the client's scan_id: a retried request finds the first save instead of adding a unit.
 """
+import contextlib
 import json
 import math
 import re
@@ -28,6 +29,13 @@ from listings import _words, title_score
 from wms import HOME_SITE, LINE_LEFT_SQL, VOIDED_SQL, Wms, WmsError, now_utc
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS box_add_photo (   -- the Add card's photo a save put on its item (Alex 11-17)
+    add_id INTEGER PRIMARY KEY,              -- a box page line (box_add.id) saved from it; several lines can share one.
+    photo_id INTEGER NOT NULL                -- Undo and Change take it off with its last standing line
+);
+CREATE TABLE IF NOT EXISTS photo_freed (     -- photos an Undo or a Change took off an item (never a person's removal):
+    photo_id INTEGER PRIMARY KEY             -- only these may move to the right item (review 11-17)
+);
 CREATE TABLE IF NOT EXISTS audit_extra (
     id INTEGER PRIMARY KEY,
     at TEXT NOT NULL,
@@ -93,6 +101,9 @@ RANGE_RE = re.compile(r'^([A-Z]{1,3})-?(\d{1,4})-(?:\1-?)?(\d{1,4})$')
 GUESS_MIN = 0.5      # share of the shorter title's words in the other: shown as a guess, never recorded alone
 MAX_NAMES = 200
 LETTER = {'amazon_fbm': 'A', 'amazon_fba': 'A', 'ebay': 'E', 'walmart': 'W'}   # box letter = the channel it sells on
+# Words too common to find a look-alike item by (new_card's twin search).
+_TWIN_STOP = {'the', 'and', 'for', 'with', 'set', 'pack', 'new', 'from', 'pcs', 'inch'}
+
 # Alex 11-11: a market is the box's letter. An item's market is the box it sits in; moving it to another letter's
 # box changes its market. No per-unit tag, so the ledger, counts and moves need nothing new. F boxes: no market yet.
 MARKETS = {'A': 'Amazon', 'E': 'eBay', 'W': 'Walmart', 'L': 'Local'}
@@ -161,6 +172,7 @@ def _place_text(site: str, name: str, code: str) -> str:
 class Sorting:
     def __init__(self, wms, commerce, audit, catalog=None, listings=None):
         self.wms, self.commerce, self.audit, self.catalog, self.listings = wms, commerce, audit, catalog, listings
+        self.photos = None   # PhotoId (server sets it): a photo taken on the Add card goes on the item it saved
         self._lock = threading.RLock()   # one scan write at a time, so a retried scan_id is seen (add() calls found())
         self._handed = {}   # box id -> (user id, time) for Next box
         conn = wms._conn()
@@ -1023,8 +1035,10 @@ class Sorting:
         made = self.wms._q1('SELECT product_id FROM put_made WHERE add_id = ?', (row['id'],))
         if made:
             unmade = self._undo_made(row, made['product_id'], user_id, device)
+            self._detach_photo(row['id'])   # after the units: a refused Undo changes nothing (review 11-17)
             return {'qty': row['qty'], 'here': 0, 'unmade': unmade}
         self._undo_units(row, user_id, device)
+        self._detach_photo(row['id'])
         return {'qty': row['qty'], 'here': self._here(self.holder(row['box_id'], row['location_id']), row['product_id'])}
 
     def _undo_units(self, row: dict, user_id: int, device: str = '') -> None:
@@ -1128,15 +1142,27 @@ class Sorting:
             ask = self.over_card(opt.get('product_id'), more) if more > 0 else {}
             if ask:
                 return {**chk, **ask, 'option': opt, 'open_sales': self.commerce.open_sales_for(opt.get('product_id'))}
-        with self._lock:
+        # A Change is one transaction: a new save that add() refuses (the other box emptied, the order cancelled or
+        # filled meanwhile) rolls the old line's undo back too (census replay c14 + review round 9, 11-17).
+        with self._lock, (self.wms._tx() if old else contextlib.nullcontext()):
             made = None
+            old_photo = None
             if old:
                 made = self.wms._q1('SELECT product_id FROM put_made WHERE add_id = ?', (old['id'],))
+                old_photo = self._photo_of(old['id'])
                 self._undo_units(old, user_id, device)
             r = self.add(to, opt, qty, user_id, device, scan_id, chk['code'], opt.get('cost_cents') if opt.get('kind') == 'new' else None)
             if made and not r.get('repeat'):
                 with self.wms._tx() as c:
                     c.execute('UPDATE put_made SET add_id = ? WHERE add_id = ?', (r['add_id'], old['id']))
+            if old and not r.get('repeat'):   # the old line's photo: back on the same item, off another one
+                if r.get('product_id') == old['product_id']:
+                    self._carry_photo(old_photo, r['add_id'])
+                else:   # freed off the wrong item, it goes on this one: the page need not send the token again (census 11-17)
+                    self._detach_photo(old['id'])
+                    if old_photo and self.photos:
+                        rel = self.wms.photo_path(old_photo)
+                        self.photos.claim(rel, r.get('product_id'), user_id, r.get('title') or '', r['add_id'])
             if old and self.labels and not r.get('repeat'):
                 with self.wms._tx() as c:
                     self.labels.carry(c, old['id'], r['add_id'])
@@ -1237,7 +1263,8 @@ class Sorting:
         self._check_not_merged(row)
         to = self.holder(row['box_id'], row['location_id'])
         filled = refill = False   # filled: goes in as not entered; refill: the Usual unit cost had filled it
-        with self._lock:
+        whole = contextlib.ExitStack()
+        with self._lock, whole:
             chk = self.add_check(to, product_id=row['product_id']) if row['product_id'] else {'options': []}
             # The options as they stand once this line is undone: its own units count as left again.
             if row['kind'] == 'audit':
@@ -1274,6 +1301,9 @@ class Sorting:
             # product is not in Boxloft" on every count change). Here only the units come out; the item stays, and
             # the new line takes over put_made, so its Undo still takes the item back.
             made = self.wms._q1('SELECT product_id FROM put_made WHERE add_id = ?', (row['id'],))
+            old_photo = self._photo_of(row['id'])
+            # From here to the end is one transaction: a refused save puts the old line back (review round 9, 11-17).
+            whole.enter_context(self.wms._tx())
             self._undo_units(row, user_id, device)
             if opt['kind'] == 'order':   # its own units are back on their order: rank again, then spread the pile
                 opt['line_ids'] = [ln['id'] for ln in self.commerce.receive_lines_for(row['product_id'])]
@@ -1286,6 +1316,9 @@ class Sorting:
                     with self.wms._tx() as c:   # this line's receipts only, never the item's other lines
                         Wms._fill_costs(c, row['product_id'], p['default_cost_cents'], user_id, now_utc(), mine)
             out = self._put_result(r, opt, qty - rest, [])
+            self._carry_photo(old_photo, r['add_id'])
+            if old_photo:   # the answer was built while the pile's undo had it off (review 11-17)
+                out['photo_id'] = old_photo
             if made:
                 with self.wms._tx() as c:
                     c.execute('UPDATE put_made SET add_id = ? WHERE add_id = ?', (r['add_id'], row['id']))
@@ -1299,6 +1332,10 @@ class Sorting:
                 new = {'kind': 'new', 'product_id': row['product_id'], 'cost_cents': cost}
                 x = self.add(to, new, rest, user_id, device, '', row['code'] or '', cost)
                 out['extra_line'] = self._put_result(x, new, rest, [])
+                if old_photo:   # the extra line came from the same save: it holds the photo too (review round 7)
+                    with self.wms._tx() as c:
+                        c.execute('INSERT OR REPLACE INTO box_add_photo (add_id, photo_id) VALUES (?, ?)', (x['add_id'], old_photo))
+                    out['extra_line']['photo_id'] = old_photo
         return out
 
     def look(self, code: str = '', product_id: int = None) -> dict:
@@ -1348,8 +1385,9 @@ class Sorting:
     # the product is made with defaults (owner Boxloft, normal tracking, cost from the order or "not entered") and 1
     # unit goes in, as put() would. One Undo takes back both.
 
-    def new_card(self, code: str) -> dict:
-        """Read only (the catalog answer is cached forever)."""
+    def new_card(self, code: str, title_hint: str = '') -> dict:
+        """Read only (the catalog answer is cached forever). title_hint: a typed name or a photo's read (Alex 11-17,
+        no barcode): with no catalog name, its look-alike items and listings show, so Yes never makes a twin unasked."""
         code = (code or '').strip()
         hits = []
         if self.catalog and code:
@@ -1360,11 +1398,15 @@ class Sorting:
         hit = hits[0] if hits else {}
         asins = tuple(sorted({(h.get('asin') or '').upper() for h in hits if h.get('asin')}))
         lines = self.commerce.rank_for_receiving(self.commerce.open_lines_for_code(code, asins))[:3] if code else []
-        title = hit.get('title') or ''
+        title = hit.get('title') or (title_hint or '').strip()[:200]
         twins = []
         if title:
-            words = ' '.join(re.findall(r'[A-Za-z0-9]+', title)[:2])
-            for p in (self.wms.list_products(search=words)[:40] if words else []):
+            # Each of the first 3 words on its own (Alex 11-17): a typed "Hand painted" must still find "Hand-painted".
+            seen_ids = set()
+            pool = []
+            for wd in [x for x in re.findall(r'[A-Za-z0-9]+', title) if len(x) > 2 and x.lower() not in _TWIN_STOP][:3]:
+                pool += [p for p in self.wms.list_products(search=wd)[:40] if p['id'] not in seen_ids and not seen_ids.add(p['id'])]
+            for p in pool:
                 if p.get('archived'):
                     continue
                 sc = title_score(title, p['title'])
@@ -1553,6 +1595,56 @@ class Sorting:
                     r['said'] = (f"Linked to your {kind} listing {l0['sku']}"
                                  + (f' and {len(linked) - 1} more' if len(linked) > 1 else '') + '. ' + (r.get('said') or ''))
             return r
+
+    def attach_photo(self, r: dict, token: str, user_id: int) -> dict:
+        """A save from the Add card's photo (Alex 11-17: "add items that don't have a barcode. Like take a picture"):
+        the photo becomes the item's photo when it has none (a new item, or an old one with no picture). A photo goes
+        on one item once (PhotoId.attach), so a resent save adds nothing."""
+        if not (token and self.photos and isinstance(r, dict) and r.get('kind') == 'added' and r.get('product_id')):
+            return r
+        if r.get('repeat'):   # a resent save: the first one attached it, or its line was undone since (review 11-17)
+            return r
+        ph = self.photos.claim(self.photos.path_for(token), r['product_id'], user_id, r.get('title') or '', r.get('add_id'))
+        return {**r, 'photo_id': ph['id']} if ph else r
+
+    def _detach_photo(self, add_id: int) -> None:
+        """Undo, or a Change to another item (review 11-17): the photo that line put on its item comes off, so the
+        item is as it was and the photo can go on the right item."""
+        link = self.wms._q1('SELECT photo_id FROM box_add_photo WHERE add_id = ?', (int(add_id),))
+        if not link:
+            return
+        ph = self.wms._q1('SELECT id, path, product_id, removed FROM photo WHERE id = ?', (link['photo_id'],))
+        with self.wms._tx() as c:
+            c.execute('DELETE FROM box_add_photo WHERE add_id = ?', (int(add_id),))
+            if c.execute('SELECT 1 FROM box_add_photo WHERE photo_id = ?', (link['photo_id'],)).fetchone():
+                return   # another standing line of this item was saved from the same photo: it stays
+            if ph and not ph['removed']:   # unreachable before (indented under the return), census 11-17
+                c.execute('UPDATE photo SET removed = 1 WHERE id = ?', (ph['id'],))
+                c.execute('INSERT OR IGNORE INTO photo_freed (photo_id) VALUES (?)', (ph['id'],))
+                if c.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'photo_read'").fetchone():
+                    c.execute('UPDATE photo_read SET product_id = NULL, saved_title = NULL WHERE photo = ? AND product_id = ?',
+                          (ph['path'], ph['product_id']))
+
+    def _photo_of(self, add_id: int):
+        """The photo a line put on its item, while it is still on it (read before the line's units come out: their
+        undo takes it off). A photo a person removed on the item page since is None: never brought back (review 11-17)."""
+        return (self.wms._q1("""SELECT bp.photo_id FROM box_add_photo bp JOIN photo ph ON ph.id = bp.photo_id
+                                WHERE bp.add_id = ? AND ph.removed = 0""", (int(add_id),)) or {}).get('photo_id')
+
+    def _carry_photo(self, photo_id, new_id: int) -> None:
+        """A count change or a Change to the same item makes a new line: the photo the old line's undo took off goes
+        back on, tied to the new line, so its Undo still takes it."""
+        if not photo_id:
+            return
+        with self.wms._tx() as c:
+            ph = c.execute('SELECT path, product_id FROM photo WHERE id = ?', (photo_id,)).fetchone()
+            if not ph:
+                return
+            c.execute('UPDATE photo SET removed = 0 WHERE id = ?', (photo_id,))
+            c.execute('DELETE FROM photo_freed WHERE photo_id = ?', (photo_id,))
+            if c.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'photo_read'").fetchone():
+                c.execute('UPDATE photo_read SET product_id = ? WHERE photo = ? AND product_id IS NULL', (ph[1], ph[0]))
+            c.execute('INSERT OR REPLACE INTO box_add_photo (add_id, photo_id) VALUES (?, ?)', (new_id, photo_id))
 
     def _undo_made(self, row: dict, product_id: int, user_id: int, device: str) -> bool:
         """Undo of a new item's first save: the unit comes out, and the item it made goes too (archived, its codes and

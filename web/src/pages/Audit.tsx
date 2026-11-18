@@ -18,7 +18,7 @@ import { centsFromInput, kinds, money, plural, when } from '@/lib/format';
 import { ebayQuery } from '@/lib/links';
 import { RETURN_REASONS } from '@/pages/Returns';
 import { cn } from '@/lib/utils';
-import { isFresh, readCurrentBox } from '@/lib/currentBox';
+import { curHolder, isFresh, readCurrentBox } from '@/lib/currentBox';
 import { SortBar } from '@/pages/AuditSort';
 
 type Status = 'todo' | 'partial' | 'found' | 'short' | 'missing';
@@ -141,7 +141,7 @@ export function FoundForm({ it, onDone, onCancel }: { it: Pick<Item, 'id' | 'exp
   const left = Math.max(1, it.expected - it.accounted);
   const [qty, setQty] = useState('1');
   const [cur] = useState(() => { const c = readCurrentBox(); return isFresh(c) ? c : null; });
-  const [to, setTo] = useState<Holder | null>(cur ? { box_id: cur.box_id } : null);
+  const [to, setTo] = useState<Holder | null>(cur ? curHolder(cur) : null);
   const [toName, setToName] = useState(cur?.name ?? '');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);

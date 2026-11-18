@@ -17,7 +17,7 @@ import { receiveLine } from '@/lib/receive';
 import { useScan, useScanBus } from '@/lib/scan';
 import { centsFromInput, day, dollarsForInput, money, plural } from '@/lib/format';
 import { cn } from '@/lib/utils';
-import { isFresh, readCurrentBox } from '@/lib/currentBox';
+import { curHolder, isFresh, readCurrentBox } from '@/lib/currentBox';
 import { boxName } from '@/lib/places';
 import { boxLabel, printLabels, unitLabel } from '@/lib/labels';
 
@@ -285,7 +285,7 @@ export function Receive() {
   const [unitCondition, setUnitCondition] = useState('');
   // The box being filled (header "Into A36") is the default place (flow audit 11-12).
   const [cur0] = useState(() => { const c = readCurrentBox(); return isFresh(c) ? c : null; });
-  const [to, setTo] = useState<Holder | null>(cur0 ? { box_id: cur0.box_id } : null);
+  const [to, setTo] = useState<Holder | null>(cur0 ? curHolder(cur0) : null);
   const [toName, setToName] = useState(cur0?.name ?? '');
   const [fields, setFields] = useState(false);       // cost, store and order # (the ticked order has them)
   const [otherPlace, setOtherPlace] = useState(false); // a shelf or a building instead of a box
@@ -298,7 +298,7 @@ export function Receive() {
     const same = !!pid && !!l && l.product_id === pid;
     setLast(l);
     const cur = readCurrentBox();   // else the box being filled (flow audit 11-12)
-    setTo(same ? l.holder : isFresh(cur) ? { box_id: cur!.box_id } : null);
+    setTo(same ? l.holder : isFresh(cur) ? curHolder(cur!) : null);
     setToName(same ? l.name : isFresh(cur) ? cur!.name : '');
     setError(null);
   }, [pid]);

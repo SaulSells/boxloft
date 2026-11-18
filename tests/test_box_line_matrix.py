@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
 
 from test_card_listings import HYDRO_UPC, with_listings  # noqa: E402
 from test_put_away import kleenex_code, order  # noqa: E402
-from test_sorting import UNLISTED_UPC, UPC, units_in  # noqa: E402
+from test_sorting import UNLISTED_UPC, UPC  # noqa: E402
 from wms import WmsError  # noqa: E402
 
 NEW = '0850001234561'
@@ -73,19 +73,50 @@ def _from_label(w, so, cat, boxes, lid):
     return {**so._put_result(r, {'kind': 'order', 'line_id': lego, 'left': 4}, 1, []), 'others': []}, ''
 
 
+JPEG = b'\xff\xd8\xff\xe0' + b'0' * 64
+
+
+def photos_for(w, so):
+    """The Add card's photo reader, with no AI call (the read is not what these tests check)."""
+    import tempfile
+    from photo_id import PhotoId
+    so.photos = PhotoId(w, so.catalog, tempfile.mkdtemp(), reader=lambda jpeg, key: None)
+    return so.photos
+
+
+def _photo(w, so, cat, boxes, lid):
+    """Alex 11-17: an item with no barcode, from the Add card's photo: made from the name, the photo is its photo."""
+    token, _ = photos_for(w, so).save_photo(JPEG)
+    r = so.put_new(boxes['A1'], 1, scan_id='m', title='Hand-painted wooden duck decoy')
+    r = so.attach_photo(r, token, 1)
+    assert r['photo_id'] and w._q1('SELECT COUNT(*) AS n FROM photo WHERE product_id = ?', (r['product_id'],))['n'] == 1
+    return r, ''
+
+
 MAKERS = {'label': (_from_label, 'order', False),'audit': (_audit, 'audit', False), 'order': (_order, 'order', False), 'move': (_move, 'move', False),
           'extra': (_extra, 'new', False), 'card': (_card, 'new', True), 'card_purchase': (_card_purchase, 'order', True),
-          'card_listing': (_card_listing, 'new', True)}
+          'card_listing': (_card_listing, 'new', True), 'photo': (_photo, 'new', True)}
 
 
-@pytest.fixture(params=sorted(MAKERS))
+def units_in(w, to, pid):
+    """Units of the item in a box, or loose at a place (no box)."""
+    return w._q1('SELECT COALESCE(SUM(qty), 0) AS n FROM stock_level WHERE box_id = ? AND location_id = ? AND product_id = ?',
+                 (to.get('box_id', 0), to.get('location_id', 0), pid))['n']
+
+
+# Alex 11-17: "put items at Alex's house in no box". Every line kind and every action runs at a place too.
+@pytest.fixture(params=[(m, at) for m in sorted(MAKERS) for at in ('box', 'house')], ids=lambda p: f'{p[0]}-{p[1]}')
 def line(request, tmp_path):
     w, so, boxes, lid = with_listings(tmp_path)
-    make, how, made = MAKERS[request.param]
+    name, at = request.param
+    if at == 'house':
+        boxes = {**boxes, 'A1': {'location_id': w.create_place("Alex's house")['id']}}
+    make, how, made = MAKERS[name]
     r, code = make(w, so, so.catalog, boxes, lid)
     assert (r['kind'], r['how'], bool(r.get('made'))) == ('added', how, made), request.param
+    assert units_in(w, boxes['A1'], r['product_id']) == 1, request.param
     return {'w': w, 'so': so, 'box': boxes['A1'], 'r': r, 'code': code, 'made': made, 'pid': r['product_id'],
-            'name': request.param}
+            'name': f'{name}-{at}'}
 
 
 def archived(w, pid):
@@ -109,7 +140,7 @@ def test_count_up_then_down(line):
     q2 = so.put_qty(q['add_id'], 1, 1)
     assert units_in(w, line['box'], line['pid']) == 1
     still_whole(line)
-    if line['name'] == 'label':   # the line still knows its package: 3 of its 4 left to put away
+    if line['name'].startswith('label-'):   # the line still knows its package: 3 of its 4 left to put away
         assert so.labels.match('1ZI2QDR00374260031')['left'] == 3
     # The line's Undo still does what the first line's Undo did: an item the card made goes with it.
     u = so.undo_add(q2['add_id'], 1)
@@ -177,3 +208,30 @@ def test_cost_typed_on_the_line(line):
     with pytest.raises(WmsError, match='undone'):
         so.set_cost(q['add_id'], 100, 1)
     assert w.check_integrity()['ok']
+
+
+def test_photo_goes_on_an_item_once_and_never_over_its_own(tmp_path):
+    """The Add card's photo (Alex 11-17): a pick of an item with no picture gives it this photo; an item with a
+    picture keeps its own; a resent save attaches nothing twice."""
+    w, so, boxes, lid = with_listings(tmp_path)
+    ph = photos_for(w, so)
+    p = w.save_product({'sku': 'DUCK-1', 'title': 'Wooden duck', 'default_cost_cents': 300})
+    token, _ = ph.save_photo(JPEG)
+    r = so.attach_photo(so.put(boxes['A1'], 1, scan_id='p1', product_id=p['id'], over_ok=True), token, 1)
+    assert r['kind'] == 'added' and r['photo_id']
+    again = so.attach_photo(so.put(boxes['A1'], 1, scan_id='p1', product_id=p['id']), token, 1)
+    assert again['add_id'] == r['add_id']
+    assert w._q1('SELECT COUNT(*) AS n FROM photo WHERE product_id = ?', (p['id'],))['n'] == 1
+    other, _ = ph.save_photo(JPEG)   # a second photo of an item that has one: its own stays
+    so.attach_photo(so.put(boxes['A1'], 1, scan_id='p2', product_id=p['id'], over_ok=True), other, 1)
+    assert w._q1('SELECT COUNT(*) AS n FROM photo WHERE product_id = ?', (p['id'],))['n'] == 1
+
+
+def test_new_card_name_finds_its_twin_before_a_second_item(tmp_path):
+    """A typed or photo-read name with no barcode (Alex 11-17): the card offers the item that looks alike first."""
+    w, so, boxes, lid = with_listings(tmp_path)
+    p = w.save_product({'sku': 'DUCK-1', 'title': 'Hand-painted wooden duck decoy', 'default_cost_cents': 300})
+    card = so.new_card('', 'Hand painted wooden duck decoy')
+    assert card['title'] == 'Hand painted wooden duck decoy'
+    assert [t['id'] for t in card['twins']] == [p['id']]
+    assert so.new_card('')['twins'] == [] and so.new_card('')['title'] == ''

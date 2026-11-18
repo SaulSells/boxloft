@@ -307,12 +307,15 @@ export function BuyMatchList({ matches, onPick, title, footer, busy, action }: {
   );
 }
 
+/** Back to the page New product came from: a box page (return=box), or a place's page (return=place, Alex 11-17). */
+const placePath = (back: string, id: string) => (back === 'place' ? `/locations/${id}` : `/boxes/${id}`);
+
 /** A tapped buy: open the product (back to the box or Receive when New product came from there), or make the product
  *  from the buy itself (its name, cost and Amazon data), keeping the photo and the scanned code. */
 function openBuy(m: PhotoMatch, keep: { back?: string | null; box?: string | null; photo?: string | null; also?: string }) {
   const { back, box } = keep;
   if (m.kind === 'product') {
-    navigate(back === 'box' && box ? `/boxes/${box}?add=${m.id}` : back === 'receive' ? `/receive?product=${m.id}` : `/inventory/${m.id}`);
+    navigate((back === 'box' || back === 'place') && box ? `${placePath(back, box)}?add=${m.id}` : back === 'receive' ? `/receive?product=${m.id}` : `/inventory/${m.id}`);
     return;
   }
   const q = new URLSearchParams({ ...(back ? { return: back } : {}), ...(box ? { box } : {}), ...(keep.photo ? { photo: keep.photo } : {}),
@@ -482,7 +485,7 @@ export function NewProduct() {
     openBuy(m, { back, box: boxParam, photo: photoParam, also: code });
   };
   const done = (p: ProductT) => navigate(back === 'receive' ? `/receive?product=${p.id}${lineId ? `&line=${lineId}` : ''}`
-    : back === 'box' && boxParam ? `/boxes/${boxParam}?add=${p.id}` : `/inventory/${p.id}`, true);
+    : (back === 'box' || back === 'place') && boxParam ? `${placePath(back, boxParam)}?add=${p.id}` : `/inventory/${p.id}`, true);
   // Alex 11-11: scanned the wrong item, or the lookup pulled the wrong thing: back out, nothing is saved.
   const cancel = () => { if (window.history.length > 1) window.history.back(); else navigate('/inventory', true); };
   const blank = () => { setState({ ...state, found: [], note: 'Starting blank. Type what it is, then tap Create product.' }); setPick(0); };

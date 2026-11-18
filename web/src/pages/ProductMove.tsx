@@ -5,10 +5,10 @@ import { get, post } from '@/api/client';
 import type { Holder, Product, ScanResult, WhereRow } from '@/api/types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Empty, HolderPicker, TapAction, tapTile } from '@/components/app/common';
+import { Empty, HolderPicker, PlaceTiles, TapAction, tapTile } from '@/components/app/common';
 import { MarketPicker } from '@/components/app/MarketPicker';
 import { useToast } from '@/components/app/toast';
-import { isFresh, touchCurrentBox, useCurrentBox } from '@/lib/currentBox';
+import { curHolder, isFresh, touchCurrentBox, useCurrentBox } from '@/lib/currentBox';
 import { money } from '@/lib/format';
 import { boxName, isShelf, placeText } from '@/lib/places';
 import { Link } from '@/lib/router';
@@ -127,10 +127,10 @@ function MovePanel({ p, row, onDone, onClose }: { p: Product; row: WhereRow | nu
   const n = !row ? max : one ? 1 : typed;
   const badQty = !!row && !one && !(n >= 1 && n <= max);
   const holds = (h: Holder) => p.where.filter((w) => hkey(holderOf(w)) === hkey(h)).reduce((a, w) => a + w.qty, 0);
-  const curBox = isFresh(cur) && (!src || hkey(src) !== `b${cur!.box_id}`) ? cur : null;
+  const curBox = isFresh(cur) && (!src || hkey(src) !== hkey(curHolder(cur!))) ? cur : null;
   // The other places this item already sits in: a person may want to join one of those piles.
   const piles = [...new Map(p.where.map((w) => [hkey(holderOf(w)), { h: holderOf(w), name: spotName(w) }])).values()]
-    .filter((s) => (!src || hkey(s.h) !== hkey(src)) && (!curBox || hkey(s.h) !== `b${curBox.box_id}`));
+    .filter((s) => (!src || hkey(s.h) !== hkey(src)) && (!curBox || hkey(s.h) !== hkey(curHolder(curBox))));
 
   const fail = (text: string) => { feedback(false); setErr(text); };
   const save = async (h: Holder, name: string) => {
@@ -144,7 +144,7 @@ function MovePanel({ p, row, onDone, onClose }: { p: Product; row: WhereRow | nu
         ? await post<{ action_id: number; moved?: number }>('/api/move', { from: src, to: h, lines: [{ product_id: p.id, unit_id: row.unit_id, qty: n }] })
         : await post<{ action_id: number; moved?: number }>(`/api/products/${p.id}/gather`, { to: h });
       feedback(true);
-      if (cur && 'box_id' in h && h.box_id === cur.box_id) touchCurrentBox();
+      if (cur && hkey(h) === hkey(curHolder(cur))) touchCurrentBox();
       onDone({ action_id: r.action_id, text: row ? `Moved ${n} from ${srcName} to ${name}` : `Moved all ${r.moved ?? n} into ${name}` });
     } catch (e) {
       // The other person moved it first: say what the server said and show what is there now.
@@ -207,8 +207,8 @@ function MovePanel({ p, row, onDone, onClose }: { p: Product; row: WhereRow | nu
 
       <div className="space-y-2">
         <div className="text-xs font-medium text-muted-foreground">Where to? Tap a box here, or scan a box or shelf label.</div>
-        {curBox && tile({ box_id: curBox.box_id }, curBox.name,
-          `The box you are filling${holds({ box_id: curBox.box_id }) ? ` · already holds ${holds({ box_id: curBox.box_id })}` : ''}`)}
+        {curBox && tile(curHolder(curBox), curBox.name,
+          `${curBox.location_id ? 'The place' : 'The box'} you are filling${holds(curHolder(curBox)) ? ` · already holds ${holds(curHolder(curBox))}` : ''}`)}
         {piles.map((s) => tile(s.h, s.name, `Already holds ${holds(s.h)} of this item`))}
       </div>
 
@@ -216,6 +216,7 @@ function MovePanel({ p, row, onDone, onClose }: { p: Product; row: WhereRow | nu
         <div className="flex items-center gap-1 text-xs font-medium text-muted-foreground"><ScanLine className="h-3.5 w-3.5" />Or choose another box or shelf:</div>
         <MarketPicker current={to && 'box_id' in to.h ? to.name : null} exclude={src && 'box_id' in src ? src.box_id : null}
           onPick={(b) => (src && hkey(src) === `b${b.id}` ? fail(`It is already in ${b.code}. Choose another box.`) : (setErr(''), setTo({ h: { box_id: b.id }, name: b.code })))} />
+        <PlaceTiles verb="Into" exclude={src} skip={[...piles.map((x) => x.h), ...(curBox ? [curHolder(curBox)] : [])]} busy={busy || badQty} onPick={(h, name) => void save(h, name)} />
         <HolderPicker value={to?.h ?? null} listen={false} exclude={src} label="Any box or shelf" onChange={(h, name) => { setErr(''); setTo({ h, name }); }} />
         {to && (
           <Button className="h-12 w-full text-base" disabled={busy || badQty} onClick={() => void save(to.h, to.name)} data-testid="move-confirm">

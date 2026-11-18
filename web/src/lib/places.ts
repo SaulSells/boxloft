@@ -19,6 +19,10 @@ export const spotOf = (l: Place) => (l.site && l.name && l.name !== l.site ? l.n
 /** A named shelf of open shelving (S1): a spot in a building whose code is its name. */
 export const isShelf = (l: Place & { kind?: string }) => !!l.site && !!l.name && l.name !== l.site && l.kind !== 'dock' && NAME_RE.test(l.code);
 
+/** The warehouse floor itself, where the boxes sit (Alex 11-17, Fable review): never a place to put items loose.
+ *  Every other place is, whatever it holds (Alex's house with a box in it still takes loose items). */
+export const isBoxFloor = (l: Place) => l.site === HOME_SITE && (l.name || l.site) === HOME_SITE;
+
 /** "Main warehouse · Receiving dock", "Main warehouse · Shelf S2", "Alex's house". */
 export const placeText = (l: Place) => [buildingOf(l), spotOf(l)].filter(Boolean).join(' · ');
 

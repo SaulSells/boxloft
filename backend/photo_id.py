@@ -199,15 +199,56 @@ class PhotoId:
         return rel if os.path.isfile(os.path.join(self.photo_dir, rel)) else None
 
     def attach(self, token: str, product_id: int, user_id: int, title: str = ''):
-        """Create product: the photo becomes the product's photo (once; a reused link adds nothing)."""
-        rel = self.path_for(token)
-        if not rel or self.wms._q1('SELECT 1 AS x FROM photo WHERE path = ?', (rel,)):
+        """Create product and the photo-id screen: the photo becomes the product's photo (once; a reused link adds
+        nothing). A photo an Undo freed goes on this item too (census 11-17)."""
+        return self.claim(self.path_for(token), product_id, user_id, title)
+
+    def claim(self, rel: str, product_id: int, user_id: int, title: str = '', add_id: int = None):
+        """The one place a photo-id photo goes on an item (census 11-17: the box page and the unlocked photo-id screen
+        each checked, then wrote, so an item got 2 photos). Every check and write is one transaction:
+        - the photo is live on this item already: a box page line (add_id) holds it too only when box page lines hold
+          it (a person attached it on the photo-id screen: an Undo of the line must not take it off);
+        - the item has another live photo, or this one is live on another item, or a person removed it: nothing;
+        - an Undo or a Change freed it (photo_freed): it moves here;
+        - else it is new: a photo row.
+        Returns {'id'} of the photo, or None when nothing went on."""
+        if not rel or not product_id:
             return None
-        ph = self.wms.add_photo(rel, user_id, product_id, source='photo-id')
         with self.wms._tx() as c:
-            c.execute('UPDATE photo_read SET product_id = ?, saved_title = ? WHERE photo = ? AND product_id IS NULL',
-                      (product_id, title, rel))
-        return ph
+            lines = c.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'box_add_photo'").fetchone()
+            rows = c.execute('SELECT id, product_id, removed FROM photo WHERE path = ? ORDER BY id DESC', (rel,)).fetchall()
+            # Every row of the file counts (census fix check 11-17: an older race could leave 2 rows of one file).
+            row = next((r for r in rows if not r[2] and r[1] == product_id), None) \
+                or next((r for r in rows if not r[2]), None) or (rows[0] if rows else None)
+            if row and not row[2] and row[1] == product_id:
+                if add_id and lines and c.execute('SELECT 1 FROM box_add_photo WHERE photo_id = ?', (row[0],)).fetchone():
+                    c.execute('INSERT OR REPLACE INTO box_add_photo (add_id, photo_id) VALUES (?, ?)', (add_id, row[0]))
+                return {'id': row[0], 'held': bool(add_id and lines and c.execute(
+                    'SELECT 1 FROM box_add_photo WHERE add_id = ? AND photo_id = ?', (add_id, row[0])).fetchone())}
+            if c.execute('SELECT 1 FROM photo WHERE product_id = ? AND removed = 0', (product_id,)).fetchone():
+                return None
+            if not c.execute('SELECT 1 FROM product WHERE id = ?', (product_id,)).fetchone():
+                raise WmsError('Product not found')
+            if row and not row[2]:
+                return None   # live on another item: it stays there
+            if rows:
+                freed = next((r for r in rows if lines and c.execute('SELECT 1 FROM photo_freed WHERE photo_id = ?', (r[0],)).fetchone()), None)
+                if not freed:
+                    return None   # a person removed it: it stays off
+                row = freed
+                c.execute('DELETE FROM photo_freed WHERE photo_id = ?', (row[0],))
+                c.execute('UPDATE photo SET product_id = ?, removed = 0 WHERE id = ?', (product_id, row[0]))
+                c.execute('UPDATE photo_read SET product_id = ?, saved_title = ? WHERE photo = ?', (product_id, title, rel))
+                phid = row[0]
+            else:
+                phid = c.execute("INSERT INTO photo (product_id, unit_id, path, user_id, created_at, source) "
+                                 "VALUES (?, NULL, ?, ?, ?, 'photo-id')", (product_id, rel, user_id, now_utc())).lastrowid
+                c.execute('UPDATE photo_read SET product_id = ?, saved_title = ? WHERE photo = ? AND product_id IS NULL',
+                          (product_id, title, rel))
+            c.execute('UPDATE product SET updated_at = ? WHERE id = ?', (now_utc(), product_id))
+            if add_id and lines:
+                c.execute('INSERT OR REPLACE INTO box_add_photo (add_id, photo_id) VALUES (?, ?)', (add_id, phid))
+            return {'id': phid, 'held': bool(add_id and lines)}
 
     # ------------------------------------------------------------------ what we bought
 

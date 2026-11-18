@@ -227,7 +227,7 @@ export function BoxPage({ id }: { id: number }) {
       <RemoveDialog box={b} open={removeOpen} onOpenChange={setRemoveOpen} />
       <div className="grid gap-4 lg:grid-cols-3 sm:gap-6">
         <div className="min-w-0 space-y-4 lg:col-span-2">
-          {!b.archived && <AddItems boxId={b.id} boxName={boxName(b)} />}
+          {!b.archived && <AddItems to={{ box_id: b.id }} boxName={boxName(b)} />}
           <ContentsList rows={b.contents} empty="This box is empty" heading={`In ${boxName(b)} now: ${units(b.units)}`} />
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={() => printLabels([boxLabel(b)])}><Printer className="mr-1.5 h-4 w-4" />Print label</Button>

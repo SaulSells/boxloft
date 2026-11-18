@@ -95,3 +95,4 @@ People read this app on a phone with a box in one hand. Short sentences, numbers
 1. Run the whole test suite. Add a test that fails without your change.
 2. For anything that changes counts, run `check_integrity()` on a copy of real data and compare the Stock audit before and after.
 3. A change to a guarded screen: add its 409 case.
+4. A change that adds state people act on in sequence (Undo, Change, a resent save, a count change, two people at once) ships with a Hypothesis state machine, `tests/test_<feature>_model.py`, built like `tests/test_photo_line_model.py`. It runs the real actions in random order and checks the rules after every step, 1,000 sequences by default (`BOXLOFT_MODEL_EXAMPLES`). A sequence bug goes into the model as an action or a rule first, then gets its fix.

@@ -1,4 +1,4 @@
-import { isFresh, readCurrentBox, setCurrentBox, touchCurrentBox } from '@/lib/currentBox';
+import { isFresh, readCurrentBox, setCurrentBox, setCurrentPlace, touchCurrentBox } from '@/lib/currentBox';
 import { useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronUp, PackagePlus, Printer, Tags, Undo2, X } from 'lucide-react';
@@ -59,7 +59,7 @@ const KEY = 'boxloft-audit-target';
 function readCur(): Cur | null {
   // One box being filled across the app (flow audit 11-12): the box page and this bar share it.
   const cb = readCurrentBox();
-  if (cb && isFresh(cb)) return { type: 'box', id: cb.box_id };
+  if (cb && isFresh(cb)) return cb.location_id ? { type: 'shelf', id: cb.location_id } : { type: 'box', id: cb.box_id };
   try {
     const m = /^(box|shelf):(\d+)$/.exec(localStorage.getItem(KEY) ?? '');
     return m ? { type: m[1] as Cur['type'], id: Number(m[2]) } : null;
@@ -143,6 +143,7 @@ export function SortBar({ onChange }: { onChange: () => void }) {
     const c = { type: t.type, id: t.id };
     setCur(c); setOpen('none'); setOffer(null);
     if (t.type === 'box') setCurrentBox(t.id, t.code);
+    else setCurrentPlace(t.id, t.code);
     setShown((p) => (p && DECIDE.includes(p.kind) ? p : null));
     feedback(true, `${t.type === 'box' ? 'Box' : 'Shelf'} ${t.code}`);
     const held = pending.current;

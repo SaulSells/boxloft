@@ -10,7 +10,7 @@ import { ActivityList } from '@/pages/Activity';
 import { Link, navigate } from '@/lib/router';
 import { ago, money, packagesText, plural, when } from '@/lib/format';
 import { useAuth } from '@/context/AuthContext';
-import { clearCurrentBox, isFresh, useCurrentBox } from '@/lib/currentBox';
+import { clearCurrentBox, curPath, isFresh, useCurrentBox } from '@/lib/currentBox';
 import type { Queue } from '@/components/app/PrintQueue';
 import { APP } from '@/lib/appConfig';
 
@@ -62,14 +62,14 @@ function StaffHome({ name }: { name: string }) {
             <div className="text-sm text-muted-foreground">Filling</div>
             <div className="text-3xl font-bold">{cur.name}</div>
             <div className="flex gap-2">
-              <Button className="h-12 flex-1 text-base" onClick={() => navigate(`/boxes/${cur.box_id}`)}><BoxIcon className="mr-1.5 h-4 w-4" />Keep filling {cur.name}</Button>
+              <Button className="h-12 flex-1 text-base" onClick={() => navigate(curPath(cur))}><BoxIcon className="mr-1.5 h-4 w-4" />Keep filling {cur.name}</Button>
               <Button variant="outline" className="h-12" onClick={clearCurrentBox}>Done</Button>
             </div>
             <p className="text-sm text-muted-foreground">Scan an item and it goes in. Scan another box label to switch.</p>
           </>
         ) : (
           <>
-            <div className="text-base font-medium">Scan a box label, then scan items into it.</div>
+            <div className="text-base font-medium">Scan a box label, then scan items into it. No box? Put away has the places.</div>
             <Button className="h-12 w-full text-base" onClick={() => navigate('/put')}><PackagePlus className="mr-1.5 h-4 w-4" />Put away</Button>
           </>
         )}

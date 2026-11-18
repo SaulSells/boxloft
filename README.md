@@ -7,6 +7,8 @@ It came out of a real resale warehouse with 2 people on the floor. Most of the h
 ## What it does
 
 - **Boxes, not bins.** Every box has a name written on it (A31). The letter is the market: A for Amazon, E for eBay, W for Walmart, L for local. Scan a box, scan items, done. Each scan saves at once and has its own Undo.
+- **Loose on a shelf, or in another building.** Put away takes a place as well as a box: one tap per building or named shelf, or "+ New place". A place has its own page, where you add items the same way as on a box page.
+- **No barcode? Take a photo.** On a box or place page, a photo of the item finds its match (needs a photo key, see AI below). One tap puts it away, and the photo becomes the item's photo when it has none.
 - **Receive.** Scan a UPC and a new item fills in from the catalog (title, photo, size). Pick the order it came from and the cost and date fill in. Items bought on 5 orders go in as one save.
 - **Arriving.** Amazon orders, store orders from your Gmail, and Walmart orders, by expected date, with tracking. Scan the carrier label on a box that showed up and it lists what's inside.
 - **Orders.** Amazon (SP-API) and eBay sales sync every 15 minutes. Walmart sales, and anything else, come in as a CSV file (Orders, Import orders). Each order shows the photo, the box to pick from and the ship box that fits. Orders the marketplace already shipped get scanned out by themselves.

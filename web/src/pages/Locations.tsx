@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, Printer } from 'lucide-react';
 import { get, post } from '@/api/client';
@@ -10,7 +10,10 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ContentsList, Empty, PageHeader } from '@/components/app/common';
+import { ContentsList, Empty, PageHeader, PlaceTiles, spotName } from '@/components/app/common';
+import { AddItems } from '@/pages/BoxAdd';
+import { setCurrentPlace } from '@/lib/currentBox';
+import { isBoxFloor } from '@/lib/places';
 import { useToast } from '@/components/app/toast';
 import { Link, navigate } from '@/lib/router';
 import { plural, prettyCode, units } from '@/lib/format';
@@ -86,11 +89,16 @@ export function Locations() {
   const rows = q.data?.locations ?? [];
   return (
     <div>
-      <PageHeader title="Locations" subtitle="Shelves and spots. Boxes sit on them; you can start with just RECV and add shelves later."
+      <PageHeader title="Locations" subtitle="Places that hold items with no box (Alex's house), and shelf spots. Boxes sit in the warehouse."
         actions={<>
           {selected.size > 0 && <Button variant="outline" onClick={() => printLabels(rows.filter((l) => selected.has(l.id)).map(locationLabel))}><Printer className="mr-1.5 h-4 w-4" />Print {selected.size}</Button>}
-          <Button onClick={() => setOpen(true)}><Plus className="mr-1.5 h-4 w-4" />Add locations</Button>
+          <Button variant="outline" onClick={() => setOpen(true)}><Plus className="mr-1.5 h-4 w-4" />Add shelf codes</Button>
         </>} />
+      {/* Alex 11-17: "How do I easily add a new location? Like Alex's basement": + New place, by its name. */}
+      <div className="mb-4 max-w-xl space-y-2">
+        <div className="text-sm font-medium">Places with no box: tap one to put items there</div>
+        <PlaceTiles verb="Open" max={0} onPick={(h) => navigate(`/locations/${'location_id' in h ? h.location_id : ''}`)} />
+      </div>
       <GeneratorDialog open={open} onOpenChange={setOpen} />
       {q.data && !rows.length ? <Empty>No locations yet</Empty> : (
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -98,7 +106,8 @@ export function Locations() {
             <div key={l.id} className="flex items-center gap-3 rounded-lg border bg-card p-3">
               <Checkbox checked={selected.has(l.id)} onCheckedChange={() => setSelected((s) => { const n = new Set(s); if (n.has(l.id)) n.delete(l.id); else n.add(l.id); return n; })} />
               <button className="min-w-0 flex-1 text-left" onClick={() => navigate(`/locations/${l.id}`)}>
-                <div className="font-mono font-bold">{l.code}</div>
+                <div className="font-bold">{spotName(l)}</div>
+                {spotName(l) !== l.code && <div className="font-mono text-xs text-muted-foreground">{l.code}</div>}
                 <div className="text-xs text-muted-foreground">{l.kind === 'dock' ? 'Dock · ' : ''}{plural(l.boxes, 'box', 'boxes')} · {units(l.units)}</div>
               </button>
             </div>
@@ -112,21 +121,28 @@ export function Locations() {
 export function LocationPage({ id }: { id: number }) {
   const q = useQuery({ queryKey: ['location', id], queryFn: () => get<Location>(`/api/locations/${id}`) });
   const l = q.data;
+  // The warehouse floor, where the boxes sit: a scan belongs in a box, not loose on the floor (same rule as PlaceTiles).
+  const open = !!l && l.kind !== 'virtual' && !l.archived && !isBoxFloor(l);
+  const name = l ? spotName({ ...l, boxes: 0, units: 0 }) : '';
+  // Alex 11-17: opening a place makes it the place being filled, as a box page does: an item scanned on any page
+  // now goes in here loose (lib/currentBox). Items go in on this page with the same Add card as a box.
+  useEffect(() => { if (l && open) setCurrentPlace(l.id, name); }, [l?.id, name, open]); // eslint-disable-line react-hooks/exhaustive-deps
   if (q.error) return <Empty>{(q.error as Error).message}</Empty>;
   if (!l) return <Skeleton className="h-64" />;
   return (
     <div className="max-w-5xl space-y-4 sm:space-y-6">
-      <PageHeader title={<span className="font-mono">{l.code}</span>} subtitle={`${prettyCode(l.scan_code)}${l.name ? ` · ${l.name}` : ''} · ${plural(l.boxes.length, 'box', 'boxes')}`}
+      <PageHeader title={name} subtitle={`${prettyCode(l.scan_code)} · items loose here, no box${l.boxes.length ? ` · ${plural(l.boxes.length, 'box', 'boxes')} here too` : ''}`}
         actions={<Button variant="outline" onClick={() => printLabels([locationLabel(l)])}><Printer className="mr-1.5 h-4 w-4" />Label</Button>} />
+      {open && <div className="max-w-xl"><AddItems to={{ location_id: l.id }} boxName={name} /></div>}
       <div className="grid gap-4 lg:grid-cols-2 sm:gap-6 [&>*]:min-w-0">
-        <Card>
+        {l.boxes.length > 0 && <Card>
           <CardHeader className="pb-2"><CardTitle className="text-base">Boxes here</CardTitle></CardHeader>
           <CardContent>
             {l.boxes.length ? <div className="divide-y text-sm">{l.boxes.map((b) => (
               <Link key={b.id} to={`/boxes/${b.id}`} className="flex justify-between py-2 hover:text-primary"><span>{b.name || `Box ${b.id}`}</span><span className="tabular-nums">{units(b.units)}</span></Link>
             ))}</div> : <Empty>No boxes here</Empty>}
           </CardContent>
-        </Card>
+        </Card>}
         <Card>
           <CardHeader className="pb-2"><CardTitle className="text-base">Loose items (not in a box)</CardTitle></CardHeader>
           <CardContent><ContentsList rows={l.loose} empty="None" /></CardContent>

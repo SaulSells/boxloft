@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ChevronRight, ImageOff, Printer, ScanLine } from 'lucide-react';
+import { ChevronRight, ImageOff, Plus, Printer, ScanLine } from 'lucide-react';
 import { get, post } from '@/api/client';
 import type { BoxRow, ContentRow, Holder, LocationRow, ScanResult } from '@/api/types';
 import { Card, CardContent } from '@/components/ui/card';
@@ -11,7 +11,7 @@ import { Link, navigate } from '@/lib/router';
 import { useScan, useScanBus } from '@/lib/scan';
 import { money, shortName, units } from '@/lib/format';
 import { cn } from '@/lib/utils';
-import { HOME_SITE, NAME_RE, boxName, buildingOf, isShelf, placeText, spotOf } from '@/lib/places';
+import { HOME_SITE, NAME_RE, boxName, buildingOf, isBoxFloor, isShelf, placeText, spotOf } from '@/lib/places';
 import { printLabels, targetLabel } from '@/lib/labels';
 import type { Target } from '@/components/app/MarketPicker';
 
@@ -219,6 +219,80 @@ function Choice({ active, onClick, children }: { active?: boolean; onClick: () =
   );
 }
 
+/** The spots where items sit loose, with no box: every place in use but the warehouse floor where the boxes sit
+ *  (isBoxFloor). Alex's house stays one when a basement or a shelf is added (Fable review 11-17). */
+export function looseSpots(locations: LocationRow[]): LocationRow[] {
+  return locations.filter((l) => l.kind !== 'virtual' && !l.archived && !isBoxFloor(l));
+}
+
+/** How a loose spot is named on a button and in "Put 1 in ...": "S2", "Alex's house", "Main warehouse · Receiving dock". */
+export const spotName = (l: LocationRow) => (isShelf(l) ? l.code : placeText(l));
+
+/** Put it at a place, no box (Alex 11-17: "put items at Alex's house in no box"): one tap per place. Every building
+ *  and room shows, most stock first; named shelves come after, `max` of them at most (a shelf label scan reaches the
+ *  rest), so a new empty place is never cut off. "+ New place" (Alex 11-17: "How do I easily add a new location? Like
+ *  Alex's basement") makes one by its name and picks it. */
+export function PlaceTiles({ onPick, verb = 'Put it at', exclude, skip = [], busy, max = 4, canMake = true }: {
+  onPick: (h: Holder, name: string) => void; verb?: string; exclude?: Holder | null;
+  /** Places the screen already offers as their own tile ("Already holds 2"): not shown twice. */
+  skip?: Holder[]; busy?: boolean; max?: number; canMake?: boolean;
+}) {
+  const qc = useQueryClient();
+  const [making, setMaking] = useState<string | null>(null);   // the new place's name, while the form is open
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const locs = useQuery({ queryKey: ['locations'], queryFn: () => get<{ locations: LocationRow[] }>('/api/locations') });
+  const make = async () => {
+    const name = (making ?? '').trim();
+    if (name.length < 2) { setErr('Type its name, like Alex\'s basement'); return; }
+    setSaving(true);
+    setErr('');
+    try {
+      const l = await post<{ id: number; code: string; name: string; site: string }>('/api/places', { site: name });
+      await qc.invalidateQueries({ queryKey: ['locations'] });
+      setMaking(null);
+      onPick({ location_id: l.id }, l.site || l.name);
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Not saved'); } finally { setSaving(false); }
+  };
+  const ex = exclude && 'location_id' in exclude ? exclude.location_id : 0;
+  const left = new Set(skip.flatMap((h) => ('location_id' in h ? [h.location_id] : [])));
+  const all = looseSpots(locs.data?.locations ?? []).filter((l) => l.id !== ex && !left.has(l.id))
+    .sort((a, b) => b.units - a.units || spotName(a).localeCompare(spotName(b)));
+  const spots = [...all.filter((l) => !isShelf(l)), ...all.filter(isShelf).slice(0, max)];
+  if (!spots.length && !canMake) return null;
+  return (
+    <div className="grid gap-2" data-testid="place-tiles">
+      {spots.map((l) => (
+        <button key={l.id} type="button" disabled={busy} onClick={() => onPick({ location_id: l.id }, spotName(l))}
+          className={cn(tapTile, 'flex min-h-12! w-full items-center gap-3 px-3 py-2')}>
+          <span className="min-w-0 flex-1">
+            <span className="block text-base font-semibold">{verb} {spotName(l)}</span>
+            <span className="block text-xs text-muted-foreground">No box · {l.units ? `${units(l.units)} there now` : 'empty'}</span>
+          </span>
+          <TapAction />
+        </button>
+      ))}
+      {canMake && (making === null ? (
+        <Button type="button" variant="outline" className="h-11 w-full justify-start" disabled={busy} onClick={() => { setMaking(''); setErr(''); }}>
+          <Plus className="mr-1.5 h-4 w-4" />New place
+        </Button>
+      ) : (
+        <form className="space-y-2 rounded-lg border p-3" onSubmit={(e) => { e.preventDefault(); void make(); }}>
+          <label htmlFor="new-place" className="text-sm font-medium">Name of the new place</label>
+          <Input id="new-place" autoFocus autoCapitalize="words" placeholder="Alex's basement" className="h-11 text-base"
+            value={making} onChange={(e) => { setMaking(e.target.value); setErr(''); }} />
+          {err && <p className="text-sm text-destructive">{err}</p>}
+          <div className="flex gap-2">
+            <Button type="submit" className="h-11 flex-1" disabled={saving || busy}>{verb} {making.trim() || 'it'}</Button>
+            <Button type="button" variant="outline" className="h-11" onClick={() => setMaking(null)}>Cancel</Button>
+          </div>
+          <p className="text-xs text-muted-foreground">Its label prints from its page (Label), when you want one.</p>
+        </form>
+      ))}
+    </div>
+  );
+}
+
 /** Choose a box or a place (Alex 11-11 12:20 PM: boxes sit on shelves; open shelving holds items loose on named
  *  shelves). Scan its label, or three short steps: 1. the building or room, 2. in a box or loose on a shelf,
  *  3. search by name (8 results at most). A name nobody has yet (A31, S4) can be made here, and its label prints. */
@@ -281,9 +355,9 @@ export function HolderPicker({ value, onChange, label = 'Where', allowLocations 
   const needle = q.trim().toUpperCase().replace(/^([A-Z]{1,3})-(\d)/, '$1$2');
   const spots = site ? places.filter((l) => buildingOf(l) === site && `l:${l.id}` !== ex) : [];
   // The building itself (where boxes sit) is a loose spot only when it has no named spots: Alex's house, not the warehouse.
-  const looseSpots = spots.filter((l) => spotOf(l)).length ? spots.filter((l) => spotOf(l)) : spots;
-  const shelfHits = looseSpots.filter((l) => !needle || l.code.toUpperCase().startsWith(needle) || spotLabel(l).toUpperCase().includes(needle)).slice(0, PICK_MAX);
-  const exactShelf = looseSpots.find((l) => l.code.toUpperCase() === needle);
+  const looseHere = spots.filter((l) => !isBoxFloor(l));
+  const shelfHits = looseHere.filter((l) => !needle || l.code.toUpperCase().startsWith(needle) || spotLabel(l).toUpperCase().includes(needle)).slice(0, PICK_MAX);
+  const exactShelf = looseHere.find((l) => l.code.toUpperCase() === needle);
   const siteBoxes = site ? allBoxes.filter((b) => boxSite(b) === site && `b:${b.id}` !== ex) : [];
   const exactBox = siteBoxes.find((b) => b.name.toUpperCase() === needle) ?? allBoxes.find((b) => b.name.toUpperCase() === needle);
   const boxHits = [
@@ -293,9 +367,15 @@ export function HolderPicker({ value, onChange, label = 'Where', allowLocations 
   ];
   const shownBoxes = boxHits.slice(0, PICK_MAX);
   const canMake = NAME_RE.test(needle);
-  const pickLoc = (l: LocationRow) => pick({ location_id: l.id }, isShelf(l) ? l.code : placeLabel(l));
+  const pickLoc = (l: LocationRow) => pick({ location_id: l.id }, spotName(l));
   const pickBox = (b: BoxRow) => pick({ box_id: b.id }, boxName(b));
-  const home = site ? spots.find((l) => !spotOf(l)) : undefined;   // the building itself: a new box sits there
+  const home = site ? spots.find((l) => !spotOf(l)) : undefined;
+  /** The building's one spot, when it has no named spots and no boxes: picking the building picks it. */
+  const soleSpot = (x: string) => {
+    if (!allowLocations || allBoxes.some((b) => boxSite(b) === x)) return undefined;
+    const here = places.filter((l) => buildingOf(l) === x && `l:${l.id}` !== ex);
+    return here.length === 1 && !spotOf(here[0]!) ? here[0] : undefined;
+  };   // the building itself: a new box sits there
 
   const make = async (what: 'box' | 'shelf') => {
     setMaking(true);
@@ -327,7 +407,12 @@ export function HolderPicker({ value, onChange, label = 'Where', allowLocations 
             <p className="text-xs font-medium text-muted-foreground">1. Which building or room?</p>
             <div className="flex flex-wrap gap-2">
               {sites.map((x) => (
-                <Choice key={x} active={site === x} onClick={() => { setSite(x); setMode(allowLocations ? null : 'box'); setQ(''); }}>{x}</Choice>
+                <Choice key={x} active={site === x} onClick={() => {
+                  // Alex 11-17: a building that is one spot with no boxes in it (Alex's house) is the answer: one tap.
+                  const only = soleSpot(x);
+                  if (only) pickLoc(only);
+                  else { setSite(x); setMode(allowLocations ? null : 'box'); setQ(''); }
+                }}>{x}{soleSpot(x) ? ' (no box)' : ''}</Choice>
               ))}
             </div>
           </div>
@@ -338,11 +423,11 @@ export function HolderPicker({ value, onChange, label = 'Where', allowLocations 
                 <Choice active={mode === 'box'} onClick={() => { setMode('box'); setQ(''); }}>
                   In a box{siteBoxes.length ? ` (${siteBoxes.length})` : ''}
                 </Choice>
-                {looseSpots.length > 0 && (
+                {looseHere.length > 0 && (
                   <Choice active={mode === 'loose'} onClick={() => {
-                    if (looseSpots.length === 1 && !spotOf(looseSpots[0]!)) pickLoc(looseSpots[0]!);   // the house itself: done
+                    if (looseHere.length === 1 && !spotOf(looseHere[0]!)) pickLoc(looseHere[0]!);   // the house itself: done
                     else { setMode('loose'); setQ(''); }
-                  }}>Loose{looseSpots.length === 1 && !spotOf(looseSpots[0]!) ? ' (no box)' : ' on a shelf'}</Choice>
+                  }}>Loose{looseHere.length === 1 && !spotOf(looseHere[0]!) ? ' (no box)' : ' on a shelf'}</Choice>
                 )}
               </div>
             </div>

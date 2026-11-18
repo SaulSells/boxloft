@@ -16,7 +16,7 @@ import { useTheme } from '@/hooks/useTheme';
 import { Link, navigate, useLocation } from '@/lib/router';
 import { useScan, useScanBus } from '@/lib/scan';
 import { CameraScanner } from '@/lib/camera';
-import { clearCurrentBox, isFresh, readCurrentBox, useCurrentBox } from '@/lib/currentBox';
+import { clearCurrentBox, curPath, isFresh, readCurrentBox, useCurrentBox } from '@/lib/currentBox';
 import { get } from '@/api/client';
 import type { ScanResult } from '@/api/types';
 import { useToast } from '@/components/app/toast';
@@ -93,13 +93,13 @@ function useOpenOnScan() {
       else if (r.kind === 'label') {   // a carrier label: what is inside, in the box being filled if there is one
         feedback(true);
         const box = readCurrentBox();
-        navigate(isFresh(box) ? `/boxes/${box!.box_id}?put=${encodeURIComponent(code)}` : `/label?code=${encodeURIComponent(code)}`);
+        navigate(isFresh(box) ? `${curPath(box!)}?put=${encodeURIComponent(code)}` : `/label?code=${encodeURIComponent(code)}`);
       }
       else if ((r.kind === 'product' || (r.kind === 'unknown' && r.value)) && isFresh(readCurrentBox())) {
         // Flow audit 11-12 (redesigns 1 and 2): a box is being filled, so the item goes into it (the box page saves
         // it, or shows the new item card for a code nothing knows).
         if (r.kind === 'unknown' && !r.lines?.length) feedback('next', 'New item: is this it?', true);
-        navigate(`/boxes/${readCurrentBox()!.box_id}?put=${encodeURIComponent(code)}`);
+        navigate(`${curPath(readCurrentBox()!)}?put=${encodeURIComponent(code)}`);
         if (r.kind === 'unknown' && !r.lines?.length) return;
       } else if (r.kind === 'product' && r.products.length > 1) navigate(`/inventory?q=${encodeURIComponent(r.value)}`);
       else if (r.kind === 'product' || (r.kind === 'unknown' && r.value)) {
@@ -172,7 +172,7 @@ function CurrentBoxChip() {
   if (!cur || !isFresh(cur)) return null;
   return (
     <div className="flex h-11 items-center rounded-md border border-primary/60 bg-primary/10 text-sm">
-      <Link to={`/boxes/${cur.box_id}`} className="flex h-full items-center px-2.5 font-semibold">Into {cur.name}</Link>
+      <Link to={curPath(cur)} className="flex h-full items-center px-2.5 font-semibold">Into {cur.name}</Link>
       <button type="button" aria-label={`Stop filling ${cur.name}`} className="flex h-full w-9 items-center justify-center border-l border-primary/40 text-muted-foreground" onClick={clearCurrentBox}>×</button>
     </div>
   );
