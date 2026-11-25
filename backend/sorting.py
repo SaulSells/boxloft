@@ -94,7 +94,7 @@ CREATE TRIGGER IF NOT EXISTS box_add_no_delete BEFORE DELETE ON box_add
 BEGIN SELECT RAISE(ABORT, 'box_add is append-only'); END;
 """
 
-ASIN_RE = re.compile(r'^B0[0-9A-Z]{8}$')
+ASIN_RE = re.compile(r'^B0[0-9A-Z]{8}\Z')
 FNSKU_RE = re.compile(r'^X0[0-9A-Z]{8}$')
 NAME_RE = re.compile(r'^[A-Z]{1,3}-?\d{1,4}$')     # a box or shelf name as written on it: A31, F7, S2
 RANGE_RE = re.compile(r'^([A-Z]{1,3})-?(\d{1,4})-(?:\1-?)?(\d{1,4})$')

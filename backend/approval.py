@@ -22,7 +22,7 @@ from wms import Wms, WmsError, now_utc
 
 US_MARKETPLACE = 'ATVPDKIKX0DER'
 CONDITION = 'new_new'
-ASIN_RE = re.compile(r'^B0[A-Z0-9]{8}$', re.I)
+ASIN_RE = re.compile(r'^B0[A-Z0-9]{8}\Z', re.I)   # \Z: '$' also matched before a trailing newline (11-25)
 OK_DAYS, RESTRICTED_DAYS = 7, 1
 PACE = 0.22   # seconds between calls in a refresh (Amazon allows 5 a second)
 RECHECK_MAX = 200   # ASINs one "Check again" asks (about 1 minute at PACE); the rest wait for the next press

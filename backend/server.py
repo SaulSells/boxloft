@@ -397,7 +397,13 @@ class Handler(BaseHTTPRequestHandler):
         return self._body
 
     def _json_peek(self, path: str):
-        """The JSON body, read once before the route (as locked() does), or None when it is not JSON."""
+        """The JSON body, read once before the route (as locked() does), or None when it is not JSON. A body that is
+        not sent as JSON, or is bigger than this path's JSON limit, is left for the route to read with its own limit
+        (11-25: /api/photo-id reads photos up to MAX_PHOTO; peeking at MAX_JSON refused photos over 2 MB)."""
+        if 'json' not in (self.headers.get('Content-Type') or '').lower():
+            return None
+        if _int(self.headers.get('Content-Length'), 0) > BODY_LIMITS.get(path, MAX_JSON):
+            return None
         raw = self.body_bytes(BODY_LIMITS.get(path, MAX_JSON))
         if not raw or raw[:1] not in (b'{', b'['):
             return None

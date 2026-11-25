@@ -121,7 +121,7 @@ CHANNELS = {
     'walmart': {'name': 'Walmart', 'key': '', 'platforms': {'walmart': 'FBM'}},
 }
 CHANNEL_LETTER = {ch: letter for letter, ch in MARKET_CHANNEL.items()}
-ASIN_RE = re.compile(r'^B0[A-Z0-9]{8}$', re.I)
+ASIN_RE = re.compile(r'^B0[A-Z0-9]{8}\Z', re.I)
 SUGGEST_MAX = 5
 
 # item-condition codes in the listings report

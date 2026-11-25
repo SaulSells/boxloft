@@ -68,7 +68,7 @@ export interface Product extends Omit<ProductRow, 'photo_id' | 'boxes' | 'value_
   pkg_weight_g: number | null;
   default_cost_cents: number | null;
   photos: { id: number; unit_id: number | null }[];
-  /** The SKU to paste into Seller Central: newest buy's date and price (Alex 11-24). null with no dated, priced buy. */
+  /** The SKU to paste into Seller Central: newest buy's date and price (Alex 11-24); with no dated, priced buy, one made from what is known (Alex 11-25). null only for no item. */
   sell_sku?: { product_id: number; sku: string; saved: boolean; day: string; cost_cents: number | null; from: string; estimated?: boolean } | null;
   where: WhereRow[];
   receipts: { id: number; qty: number; unit_cost_cents: number | null; supplier: string; reference: string; at: string; purchased_at: string | null; reversed_by: number | null; user_name?: string }[];

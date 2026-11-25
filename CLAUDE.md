@@ -7,7 +7,7 @@ A warehouse app for resellers and small 3PLs. Stock sells on Amazon (FBA and FBM
 - `backend/`: Python standard library only. `http.server` with threads, SQLite in WAL mode. Don't add Flask, FastAPI or an ORM.
 - `web/`: React 19, Vite, Tailwind 4, shadcn/ui.
 - `extension/`: Chrome MV3 extension, loaded unpacked (see README).
-- `tests/`: pytest, about 600 tests. `.venv/bin/python -m pytest -q tests`. Tests never call the network: every outside service is faked.
+- `tests/`: pytest, about 740 tests (about 4 minutes). `.venv/bin/python -m pytest -q tests`. Tests never call the network: every outside service is faked.
 - Settings: `backend/config.py` (business values from env), `backend/ai.py` (which AI service). The web app gets the settings as `window.__APP__` in index.html (`web/src/lib/appConfig.ts`).
 
 Local dev:
@@ -28,7 +28,7 @@ cd web && npm run dev                                                  # Vite on
 - Avg cost is the weighted average over receipts that weren't undone. One-off units (`tracking='unit'`) carry their own cost.
 - Cost is optional. A receipt with no cost saves 0 with `receipt.cost_missing = 1`; Avg cost leaves it out, and the item's "Usual unit cost" fills it later (`Wms._fill_costs`, each fill a `cost_fill` row). A cost a person typed is never overwritten.
 - Every product has an owner (the business itself is owner 1, or a 3PL client), so client stock never mixes into your value.
-- Many other tables are append-only too, with the same triggers (`box_add`, `audit_outcome`, `audit_count`, `audit_extra`, `listing_mark`, `cost_set`, `cost_fill`, `receipt_void`, `product_merge`). Some logs are append-only by habit only (`label_scan`, `ship_unscanned`). When a table's comment says append-only, add rows; never update them. A new append-only table gets the triggers.
+- Many other tables are append-only too, with the same triggers (`box_add`, `audit_outcome`, `audit_count`, `audit_extra`, `listing_mark`, `cost_set`, `cost_fill`, `receipt_void`, `product_merge`, `sell_sku`). Some logs are append-only by habit only (`label_scan`, `ship_unscanned`). When a table's comment says append-only, add rows; never update them. A new append-only table gets the triggers.
 
 ## Two people at once
 
@@ -67,7 +67,7 @@ HTTP server rule: one `Handler` object serves many requests on a kept-alive conn
 - `store_mail.py`, `ship_mail.py`: store orders, cancellations and shipping emails from Gmail (IMAP, read-only). Code finds candidate values; the AI judge (`ai.py`) only picks among them. A tracking number counts only next to a tracking label or as a carrier URL parameter, and must pass its check digit.
 - `labels.py`, `buyer_returns.py`: scan a carrier label and see what's inside; a buyer's return label opens its return.
 - `returns.py`: returns to the seller, one per purchase line, every change a `return_event`.
-- `listings.py`, `ebay_link.py`, `approval.py`: what is for sale on each market, eBay listings made into items, and whether Amazon lets you sell an ASIN (SP-API restrictions, cached per ASIN).
+- `listings.py`, `ebay_link.py`, `approval.py`: what is for sale on each market, eBay listings made into items, and whether Amazon lets you sell an ASIN (SP-API restrictions, cached per ASIN; Check again asks now). `Listings.sell_sku` is Copy SKU: date and price paid, saved on first copy in `sell_sku`.
 - `audit.py`, `sorting.py`: the Stock audit and scanning into boxes. Per ASIN: bought, minus sent back, minus sold on Amazon, is what should be here (`Audit._base`; what Amazon sold has one definition, the SQL view `line_presold`). Match sales and buys by ASIN, never by title words.
 - `merge.py`: "Same item as..." is switched off (`Merge.enabled = False`, `MERGE_ON` in `Product.tsx`) until its review is clean. Undo of past merges still works.
 - `printq.py`: phones send labels to a queue; the computer with the printer claims and prints them, so no job prints twice.
