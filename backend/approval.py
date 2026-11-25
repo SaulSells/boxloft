@@ -18,13 +18,16 @@ import threading
 import time
 
 from connections import SPAPI_NA, _err_text, _http
-from wms import Wms, now_utc
+from wms import Wms, WmsError, now_utc
 
 US_MARKETPLACE = 'ATVPDKIKX0DER'
 CONDITION = 'new_new'
 ASIN_RE = re.compile(r'^B0[A-Z0-9]{8}$', re.I)
 OK_DAYS, RESTRICTED_DAYS = 7, 1
 PACE = 0.22   # seconds between calls in a refresh (Amazon allows 5 a second)
+RECHECK_MAX = 200   # ASINs one "Check again" asks (about 1 minute at PACE); the rest wait for the next press
+RECHECK_RUNS = 20   # checks kept by run id for phones that lost their answer
+RECHECK_INPUT_MAX = 5000   # entries a request may send at all (junk is dropped before RECHECK_MAX counts)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS amazon_approval (
@@ -75,6 +78,13 @@ class Approval:
         self.condition = condition
         self._tok = {}
         self._tok_lock = threading.Lock()
+        self._recheck_lock = threading.Lock()   # one "Check again" at a time
+        self._tried = {}   # ASIN -> when Check again last asked Amazon, answered or not (fix check 11-24)
+        # The newest Check again: progress, then its answer. A phone that lost the connection reads the answer here
+        # (Alex 11-24: "It worked but also said load failed" on an 11-item check of 12 s).
+        self.recheck_state = {'run': '', 'running': False}
+        # The last RECHECK_RUNS checks by run id (review 11-24: another person's check must not hide yours).
+        self.recheck_runs = {}
         self.last_error = ""
         self.wms._conn().executescript(SCHEMA)
 
@@ -117,6 +127,7 @@ class Approval:
                 return None
             if attempt + 1 < tries:
                 time.sleep(1 + 2 * attempt)
+        self.last_error = f'{st}: {_err_text(p)}'   # every try failed (403s or busy): keep why (review 11-24)
         return None
 
     def _save(self, asin: str, a: dict) -> dict:
@@ -238,6 +249,63 @@ class Approval:
                 progress(f'Amazon approval: {i + 1} of {len(todo)}')
             time.sleep(PACE)
         return {'asked': asked, 'failed': failed, 'counts': self.counts()}
+
+    def recheck(self, asins, run: str = '') -> dict:
+        """Alex 11-24 ("a way to refresh the checks to see if I'm still gated"): ask Amazon now for these ASINs, fresh
+        answer or not, paced like refresh. Network only: never call it under the lock. One run at a time.
+        {asked, failed, now_ok: [asin], still, left, checked_at}; now_ok = gated before, may sell now. Past RECHECK_MAX
+        the oldest answers go first and `left` says how many wait, so the next press reaches them (review 11-24)."""
+        valid = [a for a in dict.fromkeys((x or '').upper() for x in asins or []) if ASIN_RE.match(a)]
+        if len(valid) > RECHECK_MAX:   # a failed ask counts as asked too, so ASINs Amazon keeps failing can't starve the rest
+            valid.sort(key=lambda a: max((self.get(a) or {}).get('checked_at') or '', self._tried.get(a, '')))
+        asins = valid[:RECHECK_MAX]
+        if not self.ready():
+            raise WmsError('Amazon is not connected (Settings, Connections), so Boxloft cannot ask it.')
+        if not self._recheck_lock.acquire(blocking=False):
+            raise WmsError('Amazon is being asked already. Wait a minute, then reload.')
+        state = {'run': run, 'running': True, 'done': 0, 'total': len(asins), 'started_at': now_utc()}
+        finished = False
+        self._keep_run(state)
+        try:
+            before = {a: (self.get(a) or {}).get('state') for a in asins}
+            failed, now_ok, still = 0, [], 0
+            for i, a in enumerate(asins):
+                state['done'] = i
+                if i:
+                    time.sleep(PACE)
+                self._tried[a] = now_utc()
+                r = self.ask(a, timeout=10, tries=2)
+                if r is None:
+                    failed += 1
+                elif r['state'] == 'ok':
+                    if before[a] and before[a] != 'ok':
+                        now_ok.append(a)
+                else:
+                    still += 1
+            out = {'asked': len(asins), 'failed': failed, 'now_ok': now_ok, 'still': still,
+                   'left': len(valid) - len(asins), 'checked_at': now_utc()}
+            self._keep_run({**state, 'running': False, 'done': len(asins), 'result': out})
+            finished = True
+            return out
+        finally:
+            if not finished:   # died midway, run id or not (review 11-24: one with no id stayed running)
+                self._keep_run({**state, 'running': False, 'error': 'The check stopped. Try again.'})
+            self._recheck_lock.release()
+
+    def _keep_run(self, state: dict) -> None:
+        self.recheck_state = state
+        if state.get('run'):
+            self.recheck_runs.pop(state['run'], None)
+            self.recheck_runs[state['run']] = state
+            while len(self.recheck_runs) > RECHECK_RUNS:
+                self.recheck_runs.pop(next(iter(self.recheck_runs)))
+
+    def run_state(self, run: str = '') -> dict:
+        """One check by run id ({..., unknown: True} when this server never ran it or restarted since), else the newest
+        with the recent ones listed."""
+        if run:
+            return self.recheck_runs.get(run) or {'run': run, 'running': False, 'unknown': True}
+        return {**self.recheck_state, 'recent': list(reversed(self.recheck_runs.values()))}
 
     def counts(self) -> dict:
         return {r['state']: r['n'] for r in self.wms._q(

@@ -169,6 +169,20 @@ def _place_text(site: str, name: str, code: str) -> str:
     return name or code
 
 
+def cents_in(v) -> int:
+    """A cost typed on the box page, in cents: a 400 with words for junk or a number SQLite can't hold (review 11-25:
+    a 20-digit cost string was a 500), checked before anything is written."""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        raise WmsError('Type the cost in dollars, like 12.99')
+    if n < 0:
+        raise WmsError('Cost cannot be negative')
+    if n > 100_000_00:
+        raise WmsError('Cost must be between $0 and $100,000')
+    return n
+
+
 class Sorting:
     def __init__(self, wms, commerce, audit, catalog=None, listings=None):
         self.wms, self.commerce, self.audit, self.catalog, self.listings = wms, commerce, audit, catalog, listings
@@ -652,9 +666,7 @@ class Sorting:
         code = (code or '').strip()
         scan_id = (scan_id or '')[:40] or None
         if cost_cents not in (None, ''):
-            cost_cents = int(cost_cents)
-            if cost_cents < 0:
-                raise WmsError('Cost cannot be negative')
+            cost_cents = cents_in(cost_cents)
         else:
             cost_cents = None
         with self._lock:
@@ -988,9 +1000,7 @@ class Sorting:
                 if not p:
                     raise WmsError('That product is not in Boxloft')
                 if cost_cents not in (None, ''):
-                    cost_cents = int(cost_cents)
-                    if cost_cents < 0:
-                        raise WmsError('Cost cannot be negative')
+                    cost_cents = cents_in(cost_cents)
                 elif not cost_missing:
                     cost_cents = p['avg_cost_cents'] or p['default_cost_cents']
                 else:
@@ -1104,8 +1114,12 @@ class Sorting:
         return '1 more than the orders show. Saved as extra' if qty == 1 else f'{qty} more than the orders show. Saved as extra'
 
     def put(self, to: dict, user_id: int, device: str = '', scan_id: str = '', code: str = '', product_id: int = None,
-            item_id: int = None, qty: int = 1, option: dict = None, over_ok: bool = False, replaces: int = None) -> dict:
+            item_id: int = None, qty: int = 1, option: dict = None, over_ok: bool = False, replaces: int = None,
+            fresh: bool = False) -> dict:
         """One scan (or a search pick) = one save. `option` set: the person picked it on a 'choose' card.
+        `fresh`: the item came from Put away's card, which said what a new unit goes in as (`look`, no moves). The box
+        picked there gets that, never a move out of the box that holds it (Alex 11-24: "add more of that item to a new
+        box"); the 'choose' card still lists the moves.
         Extra stock that takes the item past what was bought asks first (Alex 11-12 1:55 PM, after Sam's test scans of
         one Batmobile made 6 of 3): kind 'over', nothing saved; Yes sends the same body with that option and over_ok.
         Audit rows and order lines never ask (they stop at what is left), and a move adds no stock.
@@ -1127,7 +1141,7 @@ class Sorting:
             opt = option
         else:
             tracking = (self._product_row((chk.get('product') or {}).get('id')) or {}).get('tracking', '')
-            opt, why = self.auto_choice(chk['options'], tracking)
+            opt, why = self.auto_choice([o for o in chk['options'] if not (fresh and o['kind'] == 'move')], tracking)
             if not opt:
                 return {**chk, 'kind': 'choose', 'question': why,
                         'open_sales': self.commerce.open_sales_for((chk.get('product') or {}).get('id'))}

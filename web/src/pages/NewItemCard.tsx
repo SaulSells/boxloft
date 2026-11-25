@@ -1,5 +1,5 @@
-import { useState, type MutableRefObject, type ReactNode } from 'react';
-import { PackagePlus } from 'lucide-react';
+import { useRef, useState, type MutableRefObject, type ReactNode } from 'react';
+import { Check, PackagePlus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -18,7 +18,14 @@ import type { AmazonOk } from '@/components/app/AmazonNote';
  * that never named it; the Minecraft armadillo's listing was never linked. Now the listing is a green Link choice,
  * and every choice says what a tap does. An exact listing or item (same ASIN or barcode) is the one sure choice: Yes
  * goes away and the box label takes it. Look-alike listings (name only) wait for a tap; "make a new item" says it
- * links nothing. */
+ * links nothing.
+ * Alex 11-24 (Funko Queen 4-pack): on Put away a tap only picks, and the box choices sat off screen, so "nothing
+ * happens". A tap now scrolls to the box choices and the picked choice says Picked. */
+
+/** What a picked choice shows in place of its Link / Use arrow. */
+function Picked() {
+  return <span className="flex shrink-0 items-center gap-1 text-sm font-semibold text-primary"><Check className="h-4 w-4" />Picked</span>;
+}
 
 export type CardLine = { id: number; title: string; order_id: string; source: string; ordered_at: string | null;
   left_to_receive: number; package_left?: number | null; why?: string | null; unit_cost_cents: number | null };
@@ -65,8 +72,12 @@ export function NewItemCard({ card, boxName, busy, onSave, onTwin, onNotThis, on
   const current = mode === 'plain' ? (ready ? plain() : null) : mode;
   if (pickRef) pickRef.current = () => current;
   const where = boxName ? `puts 1 in ${boxName}` : 'puts 1 in the box you pick';
+  const slotRef = useRef<HTMLDivElement>(null);
   const choose = (p: NewPick | 'plain') => {
-    if (boxSlot) setMode(p);
+    if (boxSlot) {   // the save is the box: take the person to the box choices
+      setMode(p);
+      requestAnimationFrame(() => slotRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    }
     else if (p === 'plain') { if (ready) onSave(plain()); }
     else onSave(p);
   };
@@ -110,7 +121,7 @@ export function NewItemCard({ card, boxName, busy, onSave, onTwin, onNotThis, on
                       : `Link makes the item from this listing, links the two, and ${where}. Orders on this listing then find it there.`}
                   </span>
                 </span>
-                <TapAction label="Link" />
+                {isOn(p) ? <Picked /> : <TapAction label="Link" />}
               </button>
             );
           })}
@@ -124,7 +135,7 @@ export function NewItemCard({ card, boxName, busy, onSave, onTwin, onNotThis, on
             <Thumb photoId={t.photo_id} />
             <span className="min-w-0 flex-1 text-sm"><b>It's {t.title}</b>
               <span className="block text-xs text-muted-foreground">{t.exact ? 'Same ASIN. ' : ''}Adds this barcode to that item and {where}</span></span>
-            <TapAction label="Use" />
+            {isOn(p) ? <Picked /> : <TapAction label="Use" />}
           </button>
         );
       })}
@@ -158,7 +169,7 @@ export function NewItemCard({ card, boxName, busy, onSave, onTwin, onNotThis, on
           <p className="text-xs text-muted-foreground">Yes makes it a new item in Boxloft.</p>
         </div>
       ))}
-      {boxSlot && boxSlot(current)}
+      {boxSlot && <div ref={slotRef} className="scroll-mt-24">{boxSlot(current)}</div>}
       {!boxSlot && (
         <p className="text-xs text-muted-foreground">
           {sure ? `Or scan the ${boxName} label to link it.` : alike.length ? 'Tap one of the choices above.' : `Or scan the ${boxName} label.`} A photo can go on after.

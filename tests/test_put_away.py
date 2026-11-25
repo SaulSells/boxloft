@@ -182,3 +182,21 @@ def test_an_item_with_no_buys_never_asks(tmp_path):
     p = w.save_product({'sku': 'MUG-3', 'title': 'Green mug', 'identifiers': [{'kind': 'UPC', 'value': '0712345678935'}]})
     w.receive(1, p['id'], 5, 300, boxes['A2'])
     assert so.over_card(p['id'], 10) == {}
+
+
+def test_put_away_card_into_a_new_box_adds_a_unit_never_moves_one(tmp_path):
+    """Alex 11-24: an item already in A2, scanned on Put away and sent to another box from the card, is one more unit
+    (as the card said), not one taken out of A2. The box page's own scan still moves it (the rule above)."""
+    w, au, so, cat, inbound, boxes = setup(tmp_path)
+    p = w.save_product({'sku': 'MUG-9', 'title': 'Green mug', 'default_cost_cents': 450, 'identifiers': [{'kind': 'UPC', 'value': '0712345678911'}]})
+    w.receive(1, p['id'], 2, 450, boxes['A2'])
+    look = so.look('0712345678911')
+    assert look['goes_as']['kind'] == 'new' and [b['code'] for b in look['boxes']] == ['A2']
+    r = so.put(boxes['A1'], 1, scan_id='f1', code='0712345678911', fresh=True)
+    assert (r['kind'], r['how']) == ('added', 'new')
+    assert units_in(w, boxes['A1']) == 1 and units_in(w, boxes['A2']) == 2
+    r2 = so.put(boxes['A1'], 1, scan_id='f2', product_id=p['id'], fresh=True)   # the item page's way in (add=)
+    assert r2['how'] == 'new' and units_in(w, boxes['A2']) == 2
+    w.receive(1, p['id'], 1, 450, boxes['A3'])   # 2 other places: still a new unit, no question
+    assert so.put(boxes['A1'], 1, scan_id='f3', code='0712345678911', fresh=True)['how'] == 'new'
+    assert units_in(w, boxes['A1']) == 3 and w.check_integrity()['ok']

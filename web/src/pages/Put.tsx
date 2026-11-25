@@ -85,8 +85,9 @@ export function PutPage() {
     else if (r.kind === 'wrong') toast(r.message, { tone: 'error' });
   }, [q.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /** Into this box or place: its page saves it (one scan_id, Undo) and keeps it for the next scans. */
-  const into = (to: Holder) => navigate(`${holderPath(to)}?${look?.code ? `put=${encodeURIComponent(look.code)}` : `add=${look?.product?.id ?? product}`}`);
+  /** Into this box or place: its page saves it (one scan_id, Undo) and keeps it for the next scans. It goes in as the
+   * card says (`fresh`): a box other than the one holding it gets another unit, never one moved out of that box. */
+  const into = (to: Holder) => navigate(`${holderPath(to)}?${look?.code ? `put=${encodeURIComponent(look.code)}` : `add=${look?.product?.id ?? product}`}&fresh=1`);
 
   useScan(async (scanned) => {
     if (nc.data) {   // the new item card waits: a box label is where it goes
@@ -154,7 +155,7 @@ export function PutPage() {
             onCancel={() => navigate('/put', true)}
             boxSlot={(p) => (
               <div className="space-y-2 rounded-md border border-dashed p-3">
-                <div className="flex items-center gap-2 text-sm font-medium"><ScanLine className="h-4 w-4" />Scan the box label it goes into, or pick the box:</div>
+                <div className="flex items-center gap-2 text-sm font-medium"><ScanLine className="h-4 w-4" />{p ? 'Now the box: scan its label, or pick it here. That saves it.' : 'Tap a choice above, then scan the box label or pick the box:'}</div>
                 {cur && <Button className="h-12 w-full text-base" disabled={busy || !p} onClick={() => void saveNew(curHolder(cur), p)}><BoxIcon className="mr-1.5 h-4 w-4" />Put 1 in {cur.name}</Button>}
                 <MarketPicker onPick={(b) => void saveNew({ box_id: b.id }, p)} />
                 <div className="pt-1 text-sm font-medium">No box?</div>
@@ -181,12 +182,11 @@ export function PutPage() {
             </Button>
           ))}
           <div className="flex items-center gap-2 rounded-md border border-dashed p-3 text-sm"><ScanLine className="h-4 w-4" />{look.boxes.length ? 'Or scan another box label.' : 'Scan the box label it goes into.'}</div>
-          {!look.boxes.length && (
-            <div className="space-y-1.5">
-              <div className="text-sm font-medium">Or pick the box:</div>
-              <MarketPicker suggest={look.letter} onPick={(b) => into({ box_id: b.id })} />
-            </div>
-          )}
+          {/* Alex 11-24: an item already in a box needs a new box too (Next box makes one and prints its label). */}
+          <div className="space-y-1.5">
+            <div className="text-sm font-medium">{look.boxes.length ? 'Or pick another box, or start a new one:' : 'Or pick the box:'}</div>
+            <MarketPicker suggest={look.letter} onPick={(b) => into({ box_id: b.id })} />
+          </div>
           <div className="space-y-1.5">
             <div className="text-sm font-medium">No box?</div>
             <PlaceTiles verb="Put it at" onPick={(h) => into(h)} />

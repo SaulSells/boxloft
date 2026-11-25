@@ -98,6 +98,7 @@ export function AddItems({ to, boxName }: { to: Holder; boxName: string }) {
   const { feedback } = useScanBus();
   const addParam = useQueryParam('add');
   const putParam = useQueryParam('put');
+  const freshParam = useQueryParam('fresh');   // from Put away's card: a new unit, never a move (Alex 11-24)
   const labelParam = useQueryParam('label');   // from the Package page: a box scanned there opens here with the card
   const [q, setQ] = useState('');
   const [card, setCard] = useState<{ c: Choose; opt: number; qty: string; cost: string; replaces?: number; photo?: string } | null>(null);
@@ -260,8 +261,9 @@ export function AddItems({ to, boxName }: { to: Holder; boxName: string }) {
 
   // From the shell (an item scanned on another page with this box set), or back from New product.
   useEffect(() => {
-    if (putParam) { navigate(base, true); void put({ code: putParam }, true, putParam); }
-    else if (addParam) { navigate(base, true); void put({ product_id: Number(addParam) }, false); }
+    const fresh = freshParam ? { fresh: true } : {};
+    if (putParam) { navigate(base, true); void put({ code: putParam, ...fresh }, true, putParam); }
+    else if (addParam) { navigate(base, true); void put({ product_id: Number(addParam), ...fresh }, false); }
   }, [putParam, addParam, base]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const o = card?.c.options[card.opt];

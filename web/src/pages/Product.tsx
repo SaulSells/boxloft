@@ -7,6 +7,7 @@ import { MergeDialog } from './ProductMerge';
 const MERGE_ON: boolean = false;   // paused 11-17 2:45 PM ET with backend/merge.py Merge.enabled
 import { SendBackForm } from '@/pages/Returns';
 import { OutLink, QuickLinks, amazonOrderUrl, isAmazonOrder } from '@/lib/links';
+import { CopySku } from '@/components/app/CopySku';
 import { ApiError, get, post, upload } from '@/api/client';
 import type { CatalogItem, Identifier, Owner, PhotoMatch, PhotoRead, Product as ProductT, PurchaseLine } from '@/api/types';
 import { ProductLinks } from './ProductLinks';
@@ -677,6 +678,7 @@ export function ProductPage({ id }: { id: number }) {
         subtitle={<span className="flex flex-col gap-1.5">
           <span className="flex flex-wrap items-center gap-2"><span className="font-mono">{p.sku}</span><Badge variant="secondary">{p.owner}</Badge><span>{p.condition}</span>{p.tracking === 'unit' && <Badge variant="outline">one-off units</Badge>}{p.archived ? <Badge variant="destructive">archived</Badge> : null}</span>
           <QuickLinks title={p.title} ids={p.identifiers} orders={p.receipts.filter((r) => !r.reversed_by).map((r) => r.reference)} />
+          <CopySku s={p.sell_sku} className="self-start" />
         </span>}
         actions={
           <>

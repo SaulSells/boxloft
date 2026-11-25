@@ -25,11 +25,28 @@ import xml.etree.ElementTree as ET
 
 from connections import ConnectionError_, _http
 from sales_sync import SCHEMA as SYNC_SCHEMA, sp_call, sp_reports
+from commerce import RECEIVABLE_ORDER_SQL
 from wms import Conflict, Wms, WmsError, now_utc
 
 US_MARKETPLACE = 'ATVPDKIKX0DER'
 
 SCHEMA = """
+-- Copy SKU (Alex 11-24): the SKU an item's buy got on its first copy. Append-only: it never changes, one per item and
+-- buy text, and no two items share a SKU.
+CREATE TABLE IF NOT EXISTS sell_sku (
+    id INTEGER PRIMARY KEY,
+    product_id INTEGER NOT NULL,
+    base TEXT NOT NULL,                    -- M.D.YY-price of the buy
+    sku TEXT NOT NULL UNIQUE,              -- base, or base-2, base-3 ...
+    day TEXT NOT NULL,
+    cost_cents INTEGER NOT NULL,           -- 0: an estimated SKU with no price (Alex 11-25: always a SKU)
+    ref TEXT NOT NULL DEFAULT '',
+    user_id INTEGER,
+    at TEXT NOT NULL,
+    UNIQUE (product_id, base)
+);
+CREATE TRIGGER IF NOT EXISTS sell_sku_no_update BEFORE UPDATE ON sell_sku BEGIN SELECT RAISE(ABORT, 'sell_sku is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS sell_sku_no_delete BEFORE DELETE ON sell_sku BEGIN SELECT RAISE(ABORT, 'sell_sku is append-only'); END;
 CREATE TABLE IF NOT EXISTS listing (
     id INTEGER PRIMARY KEY,
     channel TEXT NOT NULL,                 -- 'amazon' (more marketplaces later)
@@ -258,7 +275,163 @@ def parse_ebay_item(text: str) -> dict:
             'image_url': re.sub(r'/s-l\d+\.(jpg|webp|png)$', r'/s-l500.\1', pic) if pic.startswith('https://') else ''}
 
 
+def sku_text(day: str, cents: int) -> str:
+    """Alex 11-24: a Seller Central SKU from the buy, "date it was purchased - price paid": 2026-10-12 and 1015 cents
+    = "10.12.26-10.15" (no leading zeros, as his 11.5.26 SKUs)."""
+    return f"{date_text(day)}-{cents // 100}.{cents % 100:02d}"
+
+
+def date_text(day: str) -> str:
+    """2026-10-12 -> "10.12.26"."""
+    y, m, d = (int(x) for x in day[:10].split('-'))
+    return f"{m}.{d}.{y % 100:02d}"
+
+
+# A receipt whose cost the Usual unit cost filled in (newest cost event a cost_fill; a typed cost_set wins a tie) is no
+# price paid (review 11-25: an estimate saved the usual cost as 'price: a buy' over a real buy line's price).
+NOT_FILLED = """NOT EXISTS (SELECT 1 FROM cost_fill f WHERE f.receipt_id = r.id
+                          AND NOT EXISTS (SELECT 1 FROM cost_set cs WHERE cs.receipt_id = r.id AND cs.at >= f.at))"""
+
+
 class Listings:
+    # A buy a SKU may come from: a live receipt with a cost and a purchase date, or a buy line with a price on an order
+    # that is inventory and not cancelled (review 11-24: cancelled and Not inventory orders gave SKUs).
+    _SKU_RECEIPTS = f"""
+        SELECT r.product_id, substr(r.purchased_at, 1, 10) AS day, r.unit_cost_cents AS cents, r.reference, a.at AS seen
+          FROM receipt r JOIN action a ON a.id = r.action_id
+         WHERE a.reversed_by IS NULL AND a.reverses_action_id IS NULL AND r.cost_missing = 0 AND r.unit_cost_cents > 0
+           AND {NOT_FILLED} AND r.purchased_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'"""
+    _SKU_LINES = f"""
+        SELECT l.product_id, substr(o.ordered_at, 1, 10) AS day, l.unit_cost_cents AS cents, o.external_id AS reference,
+               o.imported_at AS seen
+          FROM purchase_line l JOIN purchase_order o ON o.id = l.po_id
+         WHERE l.cancelled = 0 AND COALESCE(l.unit_cost_cents, 0) > 0 AND {RECEIVABLE_ORDER_SQL} AND o.review = ''
+           AND o.ordered_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'"""
+
+    def sell_sku(self, product_id: int):
+        """The SKU to paste into Seller Central (Alex 11-24, "the date it was purchased - price paid"): the newest buy
+        with both, as M.D.YY-price; with none, one made from what there is (`_sku_estimate`, Alex 11-25: always a
+        SKU). None only for an item that does not exist. {product_id, base, sku, saved, day, cost_cents, from,
+        estimated}.
+        The first Copy saves it (`save_sell_sku`, table sell_sku): a saved SKU never changes and no other item can
+        take it (review 11-24, 3 rounds: any SKU worked out fresh moved when buys were relinked, approved, cancelled
+        or hidden). Before that it is a preview: items with a buy on that day at that price take turns, first known
+        buy first (ties by item id), each taking the first of base, base-2, ... that is not saved by another item, not
+        taken by an earlier item and not held by an Amazon listing of another ASIN (its own listing may)."""
+        r = self._sku_buy(product_id)
+        if not r:
+            return self._sku_estimate(product_id)
+        base = sku_text(r['day'], r['cents'])
+        out = {'product_id': product_id, 'base': base, 'day': r['day'], 'cost_cents': r['cents'],
+               'from': r['reference'] or '', 'estimated': False}
+        kept = self.wms._q1('SELECT sku FROM sell_sku WHERE product_id = ? AND base = ?', (product_id, base))
+        if kept:
+            return {**out, 'sku': kept['sku'], 'saved': True}
+        saved = {x['sku']: x['product_id'] for x in self.wms._q(
+            "SELECT sku, product_id FROM sell_sku WHERE sku = ? OR sku LIKE ? ESCAPE '\\'",
+            (base, base.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '-%'))}
+        first = {x['product_id']: x['seen'] or '' for x in self.wms._q(
+            f"""SELECT product_id, MIN(seen) AS seen FROM ({self._SKU_RECEIPTS} UNION ALL {self._SKU_LINES})
+                 WHERE day = ? AND cents = ? AND product_id IS NOT NULL GROUP BY product_id""", (r['day'], r['cents']))}
+        used = set()
+        for q in sorted(set(first) | {product_id}, key=lambda q: (first.get(q, '~'), q)):
+            own = self.wms._q1('SELECT sku FROM sell_sku WHERE product_id = ? AND base = ?', (q, base))
+            if own:
+                used.add(own['sku'])
+                continue
+            mine = {x['value'].upper() for x in self.wms._q(
+                "SELECT value FROM product_identifier WHERE product_id = ? AND kind = 'ASIN'", (q,))}
+            n = 1
+            while True:   # no cap: a few hundred listings on one text still end (review 11-24: -199 was taken)
+                sku = base if n == 1 else f'{base}-{n}'
+                taken = {(x['asin'] or '').upper() for x in self.wms._q(
+                    "SELECT asin FROM listing WHERE channel = 'amazon' AND sku = ?", (sku,))}
+                if sku not in used and saved.get(sku, q) == q and (not taken or (mine and taken <= mine)):
+                    break
+                n += 1
+            used.add(sku)
+            if q == product_id:
+                return {**out, 'sku': sku, 'saved': False}
+        return None
+
+    # Rows that hold the made-up SKU of an item with no dated, priced buy end in "-S<item id>".
+    def _sku_estimate(self, product_id: int):
+        """Alex 11-25: "if we don't have data we use what we can. If we have none then we need to create a sku,
+        regardless always have a copy button." An item with no buy that has both a date and a price gets
+        M.D.YY[-price]-S<item id>. The date is its newest buy's date, else the day it came into Boxloft (its first
+        receipt), else the day the item was made (ET). The price is its newest priced buy, else its Usual unit cost,
+        else left out. The item id makes it unique with no turns; a listing of another ASIN holding it moves it on to
+        -2, -3. Once copied, the newest saved one shows while the item still has no dated, priced buy."""
+        p = self.wms._q1('SELECT id, created_at, default_cost_cents FROM product WHERE id = ?', (product_id,))
+        if not p:
+            return None
+        tag = f'-S{product_id}'
+        kept = self.wms._q1("""SELECT base, sku, day, cost_cents, ref FROM sell_sku WHERE product_id = ?
+                                 AND substr(base, -?) = ? ORDER BY id DESC LIMIT 1""", (product_id, len(tag), tag))
+        if kept:
+            return {'product_id': product_id, 'base': kept['base'], 'sku': kept['sku'], 'saved': True,
+                    'day': kept['day'], 'cost_cents': kept['cost_cents'] or None, 'from': kept['ref'], 'estimated': True}
+        from store_mail import et_day
+        live = "a.reversed_by IS NULL AND a.reverses_action_id IS NULL"
+        dated = "GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'"
+        lines = f"""FROM purchase_line l JOIN purchase_order o ON o.id = l.po_id
+                    WHERE l.product_id = ? AND l.cancelled = 0 AND {RECEIVABLE_ORDER_SQL} AND o.review = ''"""
+        day = self.wms._q1(f"""SELECT day, how FROM (
+                   SELECT substr(r.purchased_at, 1, 10) AS day, 'bought' AS how, r.id AS k FROM receipt r
+                     JOIN action a ON a.id = r.action_id WHERE r.product_id = ? AND {live} AND r.purchased_at {dated}
+                   UNION ALL SELECT substr(o.ordered_at, 1, 10), 'bought', -l.id {lines} AND o.ordered_at {dated})
+                 ORDER BY day DESC, k DESC LIMIT 1""", (product_id, product_id))
+        if not day:
+            first = self.wms._q1(f"""SELECT MIN(a.at) AS at FROM receipt r JOIN action a ON a.id = r.action_id
+                                      WHERE r.product_id = ? AND {live}""", (product_id,))
+            day = ({'day': et_day(first['at']), 'how': 'came in'} if first and first['at']
+                   else {'day': et_day(p['created_at']), 'how': 'item made'})
+        if not re.fullmatch(r'\d{4}-\d\d-\d\d', str(day['day'] or '')):   # an odd stored time: today (review 11-25)
+            from inbound import today_et
+            day = {'day': today_et().isoformat(), 'how': 'today'}
+        price = self.wms._q1(f"""SELECT cents, how FROM (
+                   SELECT r.unit_cost_cents AS cents, 'a buy' AS how, 1 AS src, r.id AS k FROM receipt r
+                     JOIN action a ON a.id = r.action_id
+                    WHERE r.product_id = ? AND {live} AND r.cost_missing = 0 AND r.unit_cost_cents > 0 AND {NOT_FILLED}
+                   UNION ALL SELECT l.unit_cost_cents, 'a buy', 2, l.id {lines} AND COALESCE(l.unit_cost_cents, 0) > 0)
+                 ORDER BY src, k DESC LIMIT 1""", (product_id, product_id))
+        if not price and (p['default_cost_cents'] or 0) > 0:
+            price = {'cents': p['default_cost_cents'], 'how': 'usual unit cost'}
+        cents = price['cents'] if price else None
+        base = (sku_text(day['day'], cents) if cents else date_text(day['day'])) + tag
+        n = 1
+        while True:
+            sku = base if n == 1 else f'{base}-{n}'
+            other = self.wms._q1('SELECT 1 FROM sell_sku WHERE sku = ? AND product_id != ?', (sku, product_id))
+            taken = {(x['asin'] or '').upper() for x in self.wms._q(
+                "SELECT asin FROM listing WHERE channel = 'amazon' AND sku = ?", (sku,))}
+            mine = {x['value'].upper() for x in self.wms._q(
+                "SELECT value FROM product_identifier WHERE product_id = ? AND kind = 'ASIN'", (product_id,))}
+            if not other and (not taken or (mine and taken <= mine)):
+                break
+            n += 1
+        note = f"date: {day['how']}" + (f", price: {price['how']}" if price else ', no price on file')
+        return {'product_id': product_id, 'base': base, 'sku': sku, 'saved': False, 'day': day['day'],
+                'cost_cents': cents, 'from': note, 'estimated': True}
+
+    def save_sell_sku(self, product_id: int, user_id: int) -> dict:
+        """Copy SKU (under the lock): the SKU the preview gives now, saved for good for this item and buy."""
+        s = self.sell_sku(product_id)
+        if not s:
+            raise WmsError('Item not found.')
+        if not s['saved']:
+            with self.wms._tx() as c:
+                c.execute("""INSERT INTO sell_sku (product_id, base, sku, day, cost_cents, ref, user_id, at)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                          (product_id, s['base'], s['sku'], s['day'], s['cost_cents'] or 0, s['from'], user_id, now_utc()))
+            s = {**s, 'saved': True}
+        return s
+
+    def _sku_buy(self, product_id: int):
+        """The newest buy with a date and a price: a live receipt first, else a buy line. {day, cents, reference}."""
+        return (self.wms._q1(f"SELECT * FROM ({self._SKU_RECEIPTS} AND r.product_id = ? ORDER BY day DESC, r.id DESC LIMIT 1)", (product_id,))
+                or self.wms._q1(f"SELECT * FROM ({self._SKU_LINES} AND l.product_id = ? ORDER BY day DESC, l.id DESC LIMIT 1)", (product_id,)))
+
     def __init__(self, wms: Wms, commerce, connections=None):
         self.wms = wms
         self.commerce = commerce

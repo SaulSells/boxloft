@@ -7,6 +7,10 @@ import { cn } from '@/lib/utils';
 export const isAmazonOrder = (id: string | null | undefined) => !!id && /^\d{3}-\d{7}-\d{7}$/.test(id.trim());
 export const amazonOrderUrl = (id: string) => `https://www.amazon.com/your-orders/order-details?orderID=${id.trim()}`;
 
+/** Seller Central's "Add offer" page for an ASIN (price, SKU, condition). Checked 11-24: /abis/listing/syh?asin= lands
+ * on /interactive/listing/workflow/offer/offer?asin=. Alex 11-24: on Listings rows and on the item page. */
+export const sellUrl = (asin: string) => `https://sellercentral.amazon.com/abis/listing/syh?asin=${encodeURIComponent(asin)}`;
+
 function asinOf(ids: Identifier[]): string | undefined {
   return ids.find((i) => i.kind === 'ASIN')?.value;
 }
@@ -25,6 +29,7 @@ export function productLinks(title: string, ids: Identifier[]) {
     asin && { label: 'Amazon', href: `https://www.amazon.com/dp/${asin}` },
     q && { label: 'eBay sold', href: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(q)}&LH_Sold=1&LH_Complete=1&_sop=13` },
     asin && { label: 'Keepa', href: `https://keepa.com/#!product/1-${asin}` },
+    asin && { label: 'List in Seller Central', href: sellUrl(asin) },
   ].filter(Boolean) as { label: string; href: string }[];
 }
 
@@ -37,7 +42,7 @@ export function OutLink({ href, children, className }: { href: string; children:
   );
 }
 
-/** Amazon, eBay sold, Keepa, then one link per Amazon order the product was bought on. */
+/** Amazon, eBay sold, Keepa, List in Seller Central, then one link per Amazon order the product was bought on. */
 export function QuickLinks({ title, ids, orders = [], className }: { title: string; ids: Identifier[]; orders?: string[]; className?: string }) {
   const links = productLinks(title, ids);
   const amz = [...new Set(orders.filter(isAmazonOrder).map((o) => o.trim()))];

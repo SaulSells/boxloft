@@ -173,7 +173,9 @@ def test_item_only_link_is_not_shipped(tmp_path):
     assert not any(B in u for u in chrome.fetched if 'progress-tracker' in u)   # no shipment: no Track page
 
 
-def test_run_reads_track_pages_copies_photo_and_moves_package_on(tmp_path):
+def test_run_reads_track_pages_copies_photo_and_moves_package_on(tmp_path, monkeypatch):
+    import inbound as inbound_mod   # Arriving keeps delivered packages DELIVERED_DAYS: read it on the test's own day
+    monkeypatch.setattr(inbound_mod, 'today_et', lambda: TODAY)
     wms, inbound, sync, chrome = setup(tmp_path)
     s = chrome.run(sync)
     assert s['track'] == {'asked': 2, 'read': 2, 'photos': 1}

@@ -162,3 +162,58 @@ def test_refresh_asks_only_stale_answers(srv, monkeypatch):
         c.execute("UPDATE amazon_approval SET checked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-2 days')")
     calls.clear()
     assert server.approval.refresh()['asked'] == 1 and [c['asin'] for c in calls] == ['B0BRANDED1']
+
+
+def test_check_again_asks_amazon_now_for_the_gated_list(srv, monkeypatch):
+    """Alex 11-24: "I need a way to refresh the checks to see if I'm still gated". Check again asks Amazon now,
+    fresh answer or not, only for the A-box items Amazon won't let us sell, outside the lock."""
+    monkeypatch.setattr(approval_mod, 'PACE', 0)
+    server, call, calls, uid = srv
+    a, e = _boxes(server, uid)
+    good = _product(server, 'GOOD', 'B0APPROVED', '036000291452')
+    brand = _product(server, 'BRANDED', 'B0BRANDED1', '012345678905')
+    closed = _product(server, 'CLOSED', 'B0CLOSED01', '012345678912')
+    for pid in (good, brand, closed):
+        server.wms.receive(uid, pid, 2, 100, {'box_id': a['id']})
+    server.approval.refresh()
+    assert server.approval.refresh()['asked'] == 0   # all fresh: the daily loop would ask nothing today
+    monkeypatch.setitem(ANSWERS, 'B0BRANDED1', {'restrictions': []})   # Alex got approved in Seller Central
+    calls.clear()
+    st, r = call('/api/amazon/approval/recheck', {})
+    assert st == 200 and sorted(c['asin'] for c in calls) == ['B0BRANDED1', 'B0CLOSED01']
+    assert not any(c['locked'] for c in calls)
+    assert (r['asked'], r['failed'], r['now_ok'], r['still']) == (2, 0, ['B0BRANDED1'], 1)
+    st, s = call('/api/listings/stock?channel=amazon')
+    assert s['summary']['not_approved'] == {'products': 1, 'units': 2}
+    # One row's own Check again: that ASIN only, even though its answer is fresh. Junk is dropped.
+    calls.clear()
+    st, r = call('/api/amazon/approval/recheck', {'asins': ['b0closed01', 'not-an-asin']})
+    assert st == 200 and [c['asin'] for c in calls] == ['B0CLOSED01'] and (r['asked'], r['still']) == (1, 1)
+    # A second press while one runs is refused, and asks Amazon nothing.
+    calls.clear()
+    with server.approval._recheck_lock:
+        st, r = call('/api/amazon/approval/recheck', {})
+    assert st == 400 and 'already' in r['error'] and calls == []
+
+
+def test_a_phone_that_lost_the_connection_reads_the_answer_by_run(srv, monkeypatch):
+    """Alex 11-24: "It worked but also said load failed". The check finished on the server while the phone lost the
+    POST's connection; the app reads the answer back by its run id."""
+    monkeypatch.setattr(approval_mod, 'PACE', 0)
+    server, call, calls, uid = srv
+    a, e = _boxes(server, uid)
+    server.wms.receive(uid, _product(server, 'BRANDED', 'B0BRANDED1', '012345678905'), 1, 100, {'box_id': a['id']})
+    server.approval.refresh()
+    st, s = call('/api/amazon/approval/recheck')
+    assert st == 200 and s == {'run': '', 'running': False, 'recent': []}   # no check yet
+    st, r = call('/api/amazon/approval/recheck', {'run': 'r1'})
+    st, s = call('/api/amazon/approval/recheck')
+    assert (s['run'], s['running'], s['done'], s['total']) == ('r1', False, 1, 1) and s['result'] == r
+    # A second press while it runs is refused and leaves the running check's state alone.
+    with server.approval._recheck_lock:
+        st, _ = call('/api/amazon/approval/recheck', {'run': 'r2'})
+    assert st == 400 and call('/api/amazon/approval/recheck')[1]['run'] == 'r1'
+    # Another person's check after it still leaves r1's answer readable by its id; an unknown id says so.
+    call('/api/amazon/approval/recheck', {'run': 'n1'})
+    assert call('/api/amazon/approval/recheck?run=r1')[1]['result'] == r
+    assert call('/api/amazon/approval/recheck?run=zz')[1] == {'run': 'zz', 'running': False, 'unknown': True}

@@ -830,8 +830,13 @@ class Wms:
                 raise WmsError('Owner not found')
             try:
                 if product_id is None:
-                    cur = c.execute("""INSERT INTO product (owner_id, sku, title, tracking, condition, notes,
-                                       default_cost_cents, created_at, updated_at, edited_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    # A new item never takes an erased item's id (review 11-24): sell_sku, listing_link, ebay_made and
+                    # old open tabs still name that id, and SQLite would hand the highest id out again.
+                    cur = c.execute("""INSERT INTO product (id, owner_id, sku, title, tracking, condition, notes,
+                                       default_cost_cents, created_at, updated_at, edited_at)
+                                       VALUES (MAX(COALESCE((SELECT MAX(id) FROM product), 0),
+                                                   COALESCE((SELECT MAX(product_id) FROM product_deleted), 0)) + 1,
+                                               ?,?,?,?,?,?,?,?,?,?)""",
                                     (owner_id, sku, title, tracking, data.get('condition') or 'New',
                                      data.get('notes') or '', data.get('default_cost_cents'), ts, ts, ts))
                     product_id = cur.lastrowid
@@ -955,7 +960,10 @@ class Wms:
     # duplicate) is deleted for good, and whatever pointed at it goes back to unlinked.
 
     HISTORY = (('stock_move', 'stock moves'), ('receipt', 'receipts'), ('unit', 'one-off units'),
-               ('box_add', 'box adds'), ('audit_extra', 'audit extras'), ('count_line', 'counts'))
+               ('box_add', 'box adds'), ('audit_extra', 'audit extras'), ('count_line', 'counts'),
+               # A SKU copied for Seller Central is in use there, and its row is keyed to the item's id: an erase would
+               # hand it to the next item that reuses the id (review 11-24). Archive instead.
+               ('sell_sku', 'SKUs copied for Seller Central'))
     POINTERS = (('purchase_line', 'order lines'), ('listing', 'listings'), ('sales_line', 'sales'))
 
     def _tables(self) -> set:
@@ -990,6 +998,8 @@ class Wms:
             # Checked again inside the write: a receipt saved a moment ago must win over the delete.
             if c.execute('SELECT 1 FROM stock_move WHERE product_id = ? LIMIT 1', (product_id,)).fetchone():
                 raise WmsError('Stock just moved on this product, so it can\'t be erased now. Archive it instead.')
+            if 'sell_sku' in tables and c.execute('SELECT 1 FROM sell_sku WHERE product_id = ? LIMIT 1', (product_id,)).fetchone():
+                raise WmsError('Its SKU was just copied for Seller Central, so it can\'t be erased now. Archive it instead.')
             for t in ('purchase_line', 'listing', 'sales_line', 'photo_read'):
                 if t in tables:
                     c.execute(f'UPDATE {t} SET product_id = NULL WHERE product_id = ?', (product_id,))

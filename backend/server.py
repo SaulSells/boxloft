@@ -45,7 +45,7 @@ from sales_sync import Sales  # noqa: E402
 from store_mail import StoreMailError, StoreOrders  # noqa: E402
 from pagesync import PageSync, PageSyncError, prefetch_photos  # noqa: E402
 from shipbox import ShipBoxes  # noqa: E402
-from approval import Approval  # noqa: E402
+from approval import RECHECK_INPUT_MAX, Approval  # noqa: E402
 from photo_id import PhotoId  # noqa: E402
 from wms import IDENTIFIER_KINDS, REMOVE_TARGETS, Conflict, Wms, WmsError, now_utc  # noqa: E402
 
@@ -116,12 +116,16 @@ class HttpError(Exception):
 
 
 def _int(v, default=None):
+    """A number from a query or body, or default. Past SQLite's 64 bits counts as no number (review 11-25: '-9...9',
+    '9_9', a 20-digit ?before= reached SQLite and crashed, some after a save had committed)."""
     try:
-        return int(v)
-    except (TypeError, ValueError):
+        n = int(v)
+    except (TypeError, ValueError, OverflowError):
         return default
+    return n if -INT64 <= n < INT64 else default
 
 
+INT64 = 2 ** 63
 ROUTES = []
 # Two people at once (Alex 11-11): every write request runs under wms.op_lock from its first check to its last
 # write, so a check ("1 left", "not shipped yet") can't be passed by two requests at once. Routes that wait on the
@@ -292,6 +296,27 @@ def locked(h, path: str, fn, args: dict):
 WEBHOOKS = {'/api/ebay/account-deletion'}
 
 
+# Path parts that are row ids: the handlers call int() on them. Anything else (a page that sent 'undefined') is a 400
+# with words, never a 500 (review 11-24: POST /api/products/undefined/sell-sku answered 'Server error').
+ID_PARAMS = {'aid', 'bid', 'cid', 'eid', 'iid', 'jid', 'kid', 'lid', 'mid', 'oid', 'pid', 'po', 'rid', 'tid', 'uid',
+             'photo_id', 'track_id'}
+
+
+def too_big(v) -> bool:
+    """A JSON number SQLite can't hold, anywhere in a body: an int or float past 64 bits. Checked before the route runs
+    (review 11-24: routes bound them after a save had committed). Strings are never checked here: tracking IDs are
+    long digit strings (USPS 22, Walmart 20, review 11-25); a string a route reads as a number goes through _int."""
+    if isinstance(v, bool) or v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return not -INT64 <= v < INT64
+    if isinstance(v, dict):
+        return any(too_big(x) for x in v.values())
+    if isinstance(v, list):
+        return any(too_big(x) for x in v)
+    return False
+
+
 def route(method: str, pattern: str, public: bool = False, admin: bool = False):
     regex = re.compile('^' + re.sub(r'<(\w+)>', r'(?P<\1>[^/]+)', pattern) + '$')
 
@@ -371,13 +396,23 @@ class Handler(BaseHTTPRequestHandler):
         self._body = self.rfile.read(length) if length else b''
         return self._body
 
+    def _json_peek(self, path: str):
+        """The JSON body, read once before the route (as locked() does), or None when it is not JSON."""
+        raw = self.body_bytes(BODY_LIMITS.get(path, MAX_JSON))
+        if not raw or raw[:1] not in (b'{', b'['):
+            return None
+        try:
+            return json.loads(raw)
+        except (ValueError, RecursionError):
+            return None
+
     def json_body(self, limit: int = MAX_JSON) -> dict:
         raw = self.body_bytes(limit)
         if not raw:
             return {}
         try:
             data = json.loads(raw)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             raise HttpError(400, 'Bad JSON')
         if not isinstance(data, dict):
             raise HttpError(400, 'Expected a JSON object')
@@ -472,8 +507,20 @@ class Handler(BaseHTTPRequestHandler):
                     raise HttpError(401, 'Please sign in')
                 if admin and not user['is_admin']:
                     raise HttpError(403, 'Admins only')
+                # At most 18 digits: SQLite's ids are 64-bit (review 11-24: 20 nines gave OverflowError, 5000 digits
+                # passed int()'s limit; both were 500s).
+                if any(k in ID_PARAMS and not (v.isascii() and v.isdigit() and len(v) <= 18)
+                       for k, v in match.groupdict().items()):
+                    raise HttpError(400, 'That address has no item number in it. Reload the page and try again.')
                 self.user = user
                 self.query = {k: v[-1] for k, v in parse_qs(url.query).items()}
+                # The extension's page posts are left out: store page data carries long digit ids pages.py reads as text.
+                try:
+                    big = method == 'POST' and not path.startswith('/api/inbound/') and too_big(self._json_peek(path))
+                except RecursionError:
+                    raise HttpError(400, 'Bad JSON')
+                if big:
+                    raise HttpError(400, 'One of the numbers sent is too big. Reload the page and try again.')
                 t0 = time.monotonic()
                 if method == 'GET' or path.startswith(UNLOCKED):
                     result = fn(self, **match.groupdict())
@@ -766,9 +813,16 @@ def product_create(h):
 @route('GET', '/api/products/<pid>')
 def product_get(h, pid):
     p = wms.get_product(int(pid))
+    p['sell_sku'] = listings.sell_sku(int(pid))   # Alex 11-24: one tap copies it for Seller Central
     names(p['history'])
     names(p['receipts'])
     return p
+
+
+@route('POST', '/api/products/<pid>/sell-sku')
+def product_sell_sku(h, pid):
+    """Copy SKU (Alex 11-24): the item's Seller Central SKU, saved on the first copy so it never changes after."""
+    return listings.save_sell_sku(int(pid), h.user['id'])
 
 
 @route('POST', '/api/products/<pid>')
@@ -1644,7 +1698,7 @@ def put_away(h):
     r = sorting.put(_to(d), h.user['id'], h.device, str(d.get('scan_id') or ''), str(d.get('code') or '')[:120],
                     _int(d.get('product_id')), _int(d.get('item_id')), _int(d.get('qty'), 1) or 1,
                     d.get('option') if isinstance(d.get('option'), dict) else None, bool(d.get('over_ok')),
-                    _int(d.get('replaces')))
+                    _int(d.get('replaces')), fresh=bool(d.get('fresh')))
     if str(r.get('kind', '')).startswith('label'):   # a carrier label (Alex 11-16): what is inside
         return _label_names(r)
     r = sorting.attach_photo(r, str(d.get('photo_token') or ''), h.user['id'])   # a pick from the Add card's photo
@@ -1914,11 +1968,32 @@ def listings_stock(h):
         bad = {'products': 0, 'units': 0}
         for r in out['rows']:
             r['approval'] = approval.note([r['asin']]) if r['asin'] else None
+            r['sell_sku'] = listings.sell_sku(r['product_id'])
             if r['approval'] and r['approval']['can_sell'] is False:
                 bad['products'] += 1
                 bad['units'] += r['on_hand']
         out['summary']['not_approved'] = bad
     return out
+
+
+@route('POST', '/api/amazon/approval/recheck')
+def amazon_recheck(h):
+    """Check again (Alex 11-24): ask Amazon now whether we may sell these ASINs. Under /api/amazon/, so outside the
+    lock (it waits on Amazon). No `asins`: every A-box item on the "Amazon won't let us sell" list."""
+    asins = h.json_body().get('asins')
+    if asins is None:
+        asins = [r['asin'] for r in listings.stock_vs_listed('amazon')['rows']
+                 if r['asin'] and approval.note([r['asin']])['can_sell'] is False]
+    elif not isinstance(asins, list):   # review 11-24: one ASIN as a string once rechecked the whole list
+        raise WmsError('asins must be a list of ASINs.')
+    return approval.recheck([str(a)[:20] for a in asins[:RECHECK_INPUT_MAX]], str(h.json_body().get('run') or '')[:40])
+
+
+@route('GET', '/api/amazon/approval/recheck')
+def amazon_recheck_state(h):
+    """The newest Check again: {run, running, done, total, result | error}. A phone that lost the POST's connection
+    reads its answer here by its `run` id (Alex 11-24, "Load failed" while the check had worked)."""
+    return approval.run_state(str(h.query.get('run') or '')[:40])
 
 
 # eBay listings become items (Alex 11-12). Not under /api/ebay/: that prefix is UNLOCKED (consent), these save.

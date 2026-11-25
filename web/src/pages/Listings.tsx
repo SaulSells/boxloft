@@ -1,13 +1,15 @@
 import { useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ExternalLink, RefreshCw, Search } from 'lucide-react';
-import { get, post } from '@/api/client';
+import { ApiError, get, post } from '@/api/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Chips, Empty, PageHeader, SearchInput, Stat, TapAction, tapTile, Thumb, SectionTitle } from '@/components/app/common';
 import { useToast } from '@/components/app/toast';
 import { Link } from '@/lib/router';
-import { ago, money, plural } from '@/lib/format';
+import { ago, money, plural, when } from '@/lib/format';
+import { sellUrl } from '@/lib/links';
+import { CopySku, type SellSku } from '@/components/app/CopySku';
 import { cn } from '@/lib/utils';
 import type { AmazonOk } from '@/components/app/AmazonNote';
 import { EbayToMatch } from '@/pages/EbayItems';
@@ -37,6 +39,7 @@ interface StockRow {
   on_hand: number; boxes: { name: string; qty: number; box_id: number | null }[]; listed: number; listed_fba: number; unlisted: number;
   reason: Reason; suggestions: Suggestion[];
   approval?: AmazonOk | null;   // Amazon market only: may we sell this ASIN (Alex 11-13)
+  sell_sku?: SellSku | null;     // Amazon market only: the SKU to paste into Seller Central (Alex 11-24)
 }
 interface Group { products: number; units: number; unlisted?: number }
 interface StockRes {
@@ -66,6 +69,46 @@ const WHY: Record<Reason, string> = {
   not_listed: 'No listing', inactive: 'Listing inactive or at 0', no_asin: 'No ASIN on the product', short: 'Listed short', listed: 'Listed',
 };
 const PAGE = 60;
+
+
+type Recheck = { asked: number; failed: number; now_ok: string[]; still: number; left: number; checked_at: string };
+type RecheckState = { run: string; running: boolean; result?: Recheck; error?: string; unknown?: boolean };
+
+/** The phone lost the POST's connection (Alex 11-24: "Load failed", though the check worked): the server keeps going,
+ * so read its answer by run id. null when the server has no trace of it (never reached it, or restarted since). */
+async function waitForRun(run: string): Promise<Recheck | string | null> {
+  for (let i = 0; i < 90; i++) {
+    await new Promise((res) => setTimeout(res, 2000));
+    try {
+      const st = await get<RecheckState>(`/api/amazon/approval/recheck?run=${encodeURIComponent(run)}`);
+      if (!st.unknown && !st.running) return st.result ?? st.error ?? 'The check stopped. Try again.';
+      if (st.unknown && i >= 4) return null;
+    } catch { /* still no signal: try again */ }
+  }
+  return null;
+}
+
+/** Check again (Alex 11-24): Amazon is asked now, whatever the cache says. No asins = the whole gated list. */
+async function askAmazon(asins: string[] | null, toast: ReturnType<typeof useToast>) {
+  const run = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    let r: Recheck;
+    try {
+      r = await post<Recheck>('/api/amazon/approval/recheck', { ...(asins ? { asins } : {}), run });
+    } catch (e) {
+      if (e instanceof ApiError) throw e;
+      const got = await waitForRun(run);
+      if (got === null) throw new Error('Lost the connection, so Boxloft cannot tell what Amazon said. The list reloads: check it, or press again.');
+      if (typeof got === 'string') throw new Error(got);
+      r = got;
+    }
+    const noAnswer = (r.failed ? ` ${plural(r.failed, 'item')} got no answer: try again.` : '') + (r.left ? ` ${r.left} more not asked yet: press again.` : '');
+    if (asins?.length === 1) toast(r.failed ? 'Amazon did not answer. Try again.' : r.still ? 'Asked Amazon: still gated.' : 'Asked Amazon: you may sell it now.');
+    else toast(`Asked Amazon about ${plural(r.asked, 'item')}: ${r.now_ok.length ? `${r.now_ok.length} you may sell now` : 'none opened up'}, ${r.still} still gated.${noAnswer}`);
+  } catch (e) {
+    toast((e as Error).message, { tone: 'error' });
+  }
+}
 
 export function Listings() {
   const qc = useQueryClient();
@@ -111,6 +154,9 @@ export function Listings() {
       void qc.invalidateQueries({ queryKey: ['listings'] });
     } catch (e) { toast((e as Error).message, { tone: 'error' }); }
   };
+  const [checking, setChecking] = useState(false);
+  // The oldest answer on the gated list: how stale "still gated" may be.
+  const gatedAsked = (stock.data?.rows ?? []).filter((r) => r.approval?.can_sell === false).map((r) => r.approval?.checked_at ?? '').filter(Boolean).sort()[0] ?? null;
   const reload = () => { void qc.invalidateQueries({ queryKey: ['listings'] }); void qc.invalidateQueries({ queryKey: ['listings-stock'] }); };
   const total = fromStock ? stockRows.length : rows.length;
   return (
@@ -160,11 +206,17 @@ export function Listings() {
       {fromStock && ss && stock.data?.synced && !!stockRows.length && !q && (
         <p className="text-sm text-muted-foreground">
           {filter === 'noamazon'
-            ? `${plural(ss.not_approved?.products ?? 0, 'product')}, ${plural(ss.not_approved?.units ?? 0, 'unit')} in A boxes that Amazon won't let us sell new. Move them to eBay boxes, or ask Amazon for approval where it takes applications. Amazon is asked again every day.`
+            ? `${plural(ss.not_approved?.products ?? 0, 'product')}, ${plural(ss.not_approved?.units ?? 0, 'unit')} in A boxes that Amazon won't let us sell new. Move them to eBay boxes, or ask Amazon for approval where it takes applications. Amazon is asked by itself every day${gatedAsked ? `; oldest answer ${when(gatedAsked)}` : ''}.`
             : filter === 'unlisted'
             ? `${plural(ss.none_for_sale.products, 'product')}, ${plural(ss.none_for_sale.units, 'unit')} in ${name} boxes with nothing for sale: ${ss.not_listed.products} with no listing, ${ss.inactive.products} inactive or at 0${market === 'amazon' ? `, ${ss.no_asin.products} with no ASIN` : ''}.`
             : `${plural(ss.short.products, 'product')} with ${plural(ss.short.unlisted ?? 0, 'unit')} in ${name} boxes that the listing does not offer.`}
         </p>
+      )}
+      {filter === 'noamazon' && !!ss?.not_approved?.products && (
+        <Button variant="outline" className="h-11 w-full" disabled={checking} onClick={async () => { setChecking(true); await askAmazon(null, toast); setChecking(false); reload(); }}>
+          <RefreshCw className={cn('mr-1.5 h-4 w-4', checking && 'animate-spin')} />
+          {checking ? `Asking Amazon about ${plural(ss.not_approved.products, 'item')}…` : `Check all ${ss.not_approved.products} with Amazon now`}
+        </Button>
       )}
       {(fromStock ? stock.isLoading : res.isLoading) && <Empty>Loading…</Empty>}
       {(fromStock ? stock.data : res.data) && !total && (
@@ -176,7 +228,7 @@ export function Listings() {
       {!!total && (
         <div className="divide-y rounded-lg border bg-card">
           {fromStock
-            ? stockRows.slice(0, limit).map((r) => <StockLine key={r.product_id} r={r} name={name} onChange={reload} />)
+            ? stockRows.slice(0, limit).map((r) => <StockLine key={r.product_id} r={r} name={name} market={market} onChange={reload} />)
             : rows.slice(0, limit).map((l) => <Row key={l.id} l={l} name={name} />)}
         </div>
       )}
@@ -202,8 +254,9 @@ export function Listings() {
 }
 
 /** A product in the market's boxes: what is here, what is listed, and why it is not (fully) for sale. */
-function StockLine({ r, name, onChange }: { r: StockRow; name: string; onChange: () => void }) {
+function StockLine({ r, name, market, onChange }: { r: StockRow; name: string; market: Market; onChange: () => void }) {
   const toast = useToast();
+  const [checking, setChecking] = useState(false);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const link = async (sg: Suggestion) => {
@@ -239,6 +292,18 @@ function StockLine({ r, name, onChange }: { r: StockRow; name: string; onChange:
             )}
             {r.approval?.can_sell === false && r.approval.apply_url && (
               <a href={r.approval.apply_url} target="_blank" rel="noreferrer" className="text-primary underline">Ask Amazon for approval</a>
+            )}
+            {r.approval?.can_sell === false && (
+              <button type="button" disabled={checking} className="inline-flex min-h-8 items-center gap-1 text-primary underline"
+                onClick={async () => { setChecking(true); await askAmazon([r.asin], toast); setChecking(false); onChange(); }}>
+                <RefreshCw className={cn('h-3 w-3', checking && 'animate-spin')} />{checking ? 'Asking Amazon…' : 'Check again'}
+              </button>
+            )}
+            {market === 'amazon' && <CopySku s={r.sell_sku} />}
+            {market === 'amazon' && r.asin && (
+              <a href={sellUrl(r.asin)} target="_blank" rel="noreferrer" className="inline-flex min-h-8 items-center gap-0.5 text-primary underline">
+                List in Seller Central<ExternalLink className="h-3 w-3" />
+              </a>
             )}
           </div>
           <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
